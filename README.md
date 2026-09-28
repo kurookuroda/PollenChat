@@ -26,8 +26,8 @@ PollenChat is a lightweight terminal-based chat application that lets you talk t
 
 ```bash
 # Clone or download pollenchat_v2.8.1.py
-git clone https://github.com/kurookuroda/Pollenchat.git
-cd Pollenchat
+git clone https://github.com/kurookuroda/PollenChat.git
+cd PollenChat
 
 # Install dependencies
 pip install -r requirements.txt
