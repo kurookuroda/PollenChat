@@ -1,7 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PollenChat v2.8.5 — Clean CLI chat client for PollinationsAI
+PollenChat v2.8.7 — Clean CLI chat client for PollinationsAI
+
+Fixes in v2.8.7:
+  - Turn guard: truncate AI responses at fake User:/Assistant:/AI: markers
+    to prevent free-tier models from generating phantom conversation turns
+  - [guard] command to toggle turn guard (default: ON)
+
+Fixes in v2.8.6:
+  - Removed \\001/\\002 ANSI wrapping in _rl_prompt() to prevent readline/libedit
+    from mis-handling prompts and causing phantom auto-input on some terminals
 
 Fixes in v2.8.5:
   - [save]: assign _sessions[name] BEFORE _save_session_atomic() so the new file
@@ -122,7 +131,7 @@ BANNER = r"""
   / /_/ / ___/ //_/ _ \   / /   / __ \/ __ `/ __/
  / ____/ /__/ ,< /  __/  / /___/ / / / /_/ / /_
 /_/    \___/_/|_|\___/   \____/_/ /_/\__,_/\__/
-                                         v2.8.5
+                                         v2.8.7
          Clean & Harmless — Powered by PollinationsAI
 """
 
@@ -137,6 +146,7 @@ _temperature: float = 0.7
 _max_tokens: Optional[int] = None
 _stream_mode: bool = True
 _last_assistant_text: str = ""
+_turn_guard_enabled: bool = True  # stops AI from generating fake user/assistant turns
 
 # Image mode defaults (not persisted in config)
 _img_width: int = 1024
@@ -176,18 +186,36 @@ def _sanitize_session_name(name: str) -> str:
     return name or "untitled"
 
 def _rl_prompt(s: str) -> str:
-    """Wrap ANSI escape sequences with \001/\002 for readline display-width safety.
+    """Return prompt as-is.
 
-    On platforms without readline (e.g. Windows without pyreadline) the wrapper
-    is skipped so control characters do not leak into the prompt.
+    Previously this wrapped ANSI codes with \\001/\\002 for readline width
+    calculation, but some readline implementations (macOS libedit, etc.)
+    mishandle those markers and cause display glitches or phantom auto-input.
+    readline itself (arrow keys, history) still works; cursor position may
+    be slightly off during long prompts, but that is safer than broken input.
     """
-    if not _HAS_READLINE:
-        return s
-    return re.sub(r"(\x1b\[[0-9;]*m)", r"\001\1\002", s)
+    return s
+
+
+# Turn guard: some free-tier models keep generating fake User:/Assistant: turns.
+# We truncate the response at the first such marker so the UI does not loop.
+_TURN_RE = re.compile(
+    r"(?:^|\n)\s*(?:User|Assistant|AI)\s*[:：]",
+    re.IGNORECASE,
+)
+
+
+def _truncate_at_turn(text: str) -> str:
+    """Truncate text at the first turn-marker if turn guard is enabled."""
+    if not _turn_guard_enabled:
+        return text
+    m = _TURN_RE.search(text)
+    return text[: m.start()] if m else text
+
 
 def _ask(prompt_text: str) -> str:
-    """Wrapper around input() that applies _rl_prompt() automatically."""
-    return input(_rl_prompt(prompt_text)).strip()
+    """Wrapper around input()."""
+    return input(prompt_text).strip()
 
 # ============ CONFIG ============
 def load_config() -> dict:
@@ -429,13 +457,23 @@ def edit_config() -> None:
 
     save_config(build_config())
 
-# ============ STREAM TOGGLE ============
+# ============ STREAM / TURN GUARD TOGGLE ============
 def toggle_stream() -> None:
     global _stream_mode
     _stream_mode = not _stream_mode
     status = "ON (streaming)" if _stream_mode else "OFF (batch)"
     print(f"{Fore.GREEN}[OK] Streaming mode: {status}{Style.RESET_ALL}")
     save_config(build_config())
+
+
+def toggle_turn_guard() -> None:
+    global _turn_guard_enabled
+    _turn_guard_enabled = not _turn_guard_enabled
+    status = "ON" if _turn_guard_enabled else "OFF"
+    print(
+        f"{Fore.GREEN}[OK] Turn guard: {status}{Style.RESET_ALL} "
+        f"(stops AI from generating fake user/assistant turns)"
+    )
 
 # ============ SESSION MANAGEMENT (multi-session) ============
 def _valid_history(history: object) -> bool:
@@ -644,7 +682,7 @@ def send_chat(
 
     headers = {
         "Content-Type": "application/json",
-        "User-Agent": "PollenChat/2.8.5",
+        "User-Agent": "PollenChat/2.8.7",
     }
 
     try:
@@ -700,6 +738,8 @@ def stream_response(response: requests.Response) -> tuple[str, bool]:
                 sys.stdout.write(Fore.MAGENTA + content + Style.RESET_ALL)
                 sys.stdout.flush()
                 full_text += content
+                # Turn guard: stop if the accumulated text hits a fake turn marker
+                full_text = _truncate_at_turn(full_text)
         completed = True
         print()
     except KeyboardInterrupt:
@@ -717,8 +757,13 @@ def batch_response(response: requests.Response) -> tuple[str, bool]:
             if isinstance(message, dict):
                 content = message.get("content", "")
                 if content:
-                    print(Fore.MAGENTA + content + Style.RESET_ALL)
-                    return content, True
+                    truncated = _truncate_at_turn(content)
+                    if truncated != content:
+                        print(
+                            f"\n{Fore.YELLOW}[~] Turn guard stopped fake turn generation.{Style.RESET_ALL}"
+                        )
+                    print(Fore.MAGENTA + truncated + Style.RESET_ALL)
+                    return truncated, True
         return "", True
     except (json.JSONDecodeError, KeyError, AttributeError, requests.exceptions.RequestException) as e:
         print(f"{Fore.RED}[!] Batch response error: {e}{Style.RESET_ALL}")
@@ -1255,6 +1300,7 @@ PollenChat Commands:
   [system]      — Set or view the system prompt
   [config]      — Set temperature / max_tokens
   [stream]      — Toggle streaming / batch display mode
+  [guard]       — Toggle turn guard (stops fake user/assistant turns)
   [image]       — Enter image generation mode
   [long]        — Enter multiline input mode (type [end] to finish)
   [import]      — Import a .md/.txt file and send as user message
@@ -1341,6 +1387,8 @@ def main() -> None:
                     edit_config()
                 elif cmd in ("[stream]", "stream"):
                     toggle_stream()
+                elif cmd in ("[guard]", "guard"):
+                    toggle_turn_guard()
                 elif cmd in ("[image]", "image"):
                     image_mode()
                 elif cmd in ("[long]", "long"):
