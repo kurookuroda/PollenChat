@@ -1,4 +1,4 @@
-# PollenChat v2.8.1
+# PollenChat v2.8.5
 
 A clean, harmless CLI chat client for [PollinationsAI](https://pollinations.ai/).
 
@@ -11,7 +11,7 @@ PollenChat is a lightweight terminal-based chat application that lets you talk t
 - **System prompt editing** — Customize the assistant's behavior with `[system]`
 - **Temperature / max_tokens control** — Fine-tune generation parameters with `[config]`
 - **Image generation** — Generate images from text prompts inside `[image]` mode, with configurable size and seed
-- **Multiline input** — Paste or type long messages with `[long]`
+- **Multiline input** — Paste or type long messages with `[long]` (type `[end]` on its own line to finish; blank lines are preserved)
 - **File import** — Load `.md` or `.txt` files and send them as user messages with `[import]`
 - **Conversation search** — Find past messages with `[search]`
 - **Markdown rendering** — Re-display the last response with formatted Markdown via `[render]`
@@ -20,12 +20,12 @@ PollenChat is a lightweight terminal-based chat application that lets you talk t
 - **Undo** — Remove the last user-assistant exchange with `[undo]`
 - **Token estimate** — Rough token count estimation for the current context with `[token]`
 - **Multi-session management** — Manage multiple parallel conversations with `[sessions]`, `[switch]`, `[new]`, `[rename]`, `[delete]`
-- **Auto-save / auto-load** — All sessions are automatically saved on exit and restored on startup
+- **Auto-save / auto-load** — Every session is saved atomically after each exchange (and on `[undo]`/`[clear]`), plus once more on exit; all sessions are restored on startup
 
 ## Installation
 
 ```bash
-# Clone or download pollenchat_v2.8.1.py
+# Clone or download pollenchat.py
 git clone https://github.com/kurookuroda/PollenChat.git
 cd PollenChat
 
@@ -48,7 +48,7 @@ On first launch you will be asked for your name. After that, just type normally 
 | Command | Description |
 |---------|-------------|
  `[model]` | Select AI model |
- `[system]` | Set or view the system prompt |
+ `[system]` | Set or view the system prompt (multi-line, type `[end]` to finish, `[reset]` for default) |
  `[config]` | Set `temperature` / `max_tokens` |
  `[stream]` | Toggle streaming / batch display mode |
 
@@ -78,7 +78,7 @@ On first launch you will be asked for your name. After that, just type normally 
 
 Inside image mode:
 - Type a prompt to generate an image
-- `[size]` — change width/height (default 1024x1024)
+- `[size]` — change width/height (default 1024x1024, range 64–4096)
 - `[seed]` — set/clear a fixed seed for reproducible images
 - `exit` — return to chat mode
 
@@ -127,7 +127,7 @@ PollenChat supports multiple parallel conversation sessions. Each session is an 
 Inside `[image]` mode you can:
 
 - Type a prompt to generate an image
-- Use `[size]` to change width/height (default 1024x1024)
+- Use `[size]` to change width/height (default 1024x1024, range 64–4096)
 - Use `[seed]` to fix a random seed for reproducible images
 - Type `exit` to return to chat mode
 
