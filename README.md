@@ -1,8 +1,8 @@
-# PollenChat
+# PollenChat v2.8.1
 
 A clean, harmless CLI chat client for [PollinationsAI](https://pollinations.ai/).
 
-PollenChat is a lightweight terminal-based chat application that lets you talk to various AI models (OpenAI, Mistral, Llama, Claude, Gemini, etc.) through the PollinationsAI free API. It also supports image generation, session management, code extraction, and more.
+PollenChat is a lightweight terminal-based chat application that lets you talk to various AI models (OpenAI, Mistral, Llama, Claude, Gemini, etc.) through the PollinationsAI free API. It also supports image generation, multi-session management, code extraction, and more.
 
 ## Features
 
@@ -19,15 +19,15 @@ PollenChat is a lightweight terminal-based chat application that lets you talk t
 - **Session export** — Export conversations to Markdown files with `[export]`
 - **Undo** — Remove the last user-assistant exchange with `[undo]`
 - **Token estimate** — Rough token count estimation for the current context with `[token]`
-- **Session save/load** — Persist conversations as JSON with `[save]` / `[load]`
-- **History management** — View or clear conversation history
+- **Multi-session management** — Manage multiple parallel conversations with `[sessions]`, `[switch]`, `[new]`, `[rename]`, `[delete]`
+- **Auto-save / auto-load** — All sessions are automatically saved on exit and restored on startup
 
 ## Installation
 
 ```bash
-# Clone or download pollenchat_v2.7.1.py
-git clone https://github.com/yourname/pollenchat.git
-cd pollenchat
+# Clone or download pollenchat_v2.8.1.py
+git clone https://github.com/kurookuroda/Pollenchat.git
+cd Pollenchat
 
 # Install dependencies
 pip install -r requirements.txt
@@ -36,12 +36,14 @@ pip install -r requirements.txt
 ## Quick Start
 
 ```bash
-python pollenchat_v2.7.1.py
+python pollenchat.py
 ```
 
 On first launch you will be asked for your name. After that, just type normally to chat. Use `[help]` to see all available commands.
 
 ## Commands
+
+### Chat & Settings
 
 | Command | Description |
 |---------|-------------|
@@ -49,21 +51,57 @@ On first launch you will be asked for your name. After that, just type normally 
  `[system]` | Set or view the system prompt |
  `[config]` | Set `temperature` / `max_tokens` |
  `[stream]` | Toggle streaming / batch display mode |
- `[image]` | Enter image generation mode |
+
+### Input
+
+| Command | Description |
+|---------|-------------|
  `[long]` | Enter multiline input mode |
  `[import]` | Import a `.md` / `.txt` file and send as user message |
+
+### Output & History
+
+| Command | Description |
+|---------|-------------|
  `[search]` | Search conversation history |
  `[render]` | Re-display last response with Markdown formatting |
  `[savecode]` | Extract and save code blocks from last response |
  `[export]` | Export conversation to Markdown file |
  `[undo]` | Remove the last user-assistant exchange |
  `[token]` | Show rough token estimate for current context |
- `[save]` | Save current session |
- `[load]` | Load a saved session |
- `[clear]` | Clear conversation history |
- `[history]` | Show conversation history |
+
+### Image Generation
+
+| Command | Description |
+|---------|-------------|
+ `[image]` | Enter image generation mode |
+
+Inside image mode:
+- Type a prompt to generate an image
+- `[size]` — change width/height (default 1024x1024)
+- `[seed]` — set/clear a fixed seed for reproducible images
+- `exit` — return to chat mode
+
+### Session Management
+
+| Command | Description |
+|---------|-------------|
+ `[sessions]` | List all sessions |
+ `[switch]` | Switch to another session |
+ `[new]` | Create a new empty session |
+ `[rename]` | Rename the current session |
+ `[delete]` | Delete a session (cannot delete current) |
+ `[save]` | Save current session manually (legacy) |
+ `[load]` | Load a session from file manually (legacy) |
+ `[clear]` | Clear current session history |
+ `[history]` | Show current session history |
+
+### Other
+
+| Command | Description |
+|---------|-------------|
  `[help]` | Show help |
- `[exit]` | Quit PollenChat |
+ `[exit]` | Quit PollenChat (auto-saves all sessions) |
 
 ## Directories
 
@@ -74,6 +112,15 @@ PollenChat creates the following directories in its working folder:
 - `pollen_codes/` — Extracted code blocks
 - `pollen_exports/` — Exported Markdown conversations
 - `config.json` — User preferences (model, system prompt, username, etc.)
+
+## Session Management Details
+
+PollenChat supports multiple parallel conversation sessions. Each session is an independent conversation history.
+
+- **Auto-load**: On startup, all `.json` files in `sessions/` are automatically loaded as sessions.
+- **Auto-save**: On exit (`[exit]` or Ctrl+D), all sessions are automatically saved back to `sessions/`.
+- **Current session indicator**: The prompt shows the active session name: `User[work] :`
+- **Session-agnostic config**: `model`, `system_prompt`, `temperature`, and `max_tokens` are global settings shared across all sessions.
 
 ## Image Generation
 
