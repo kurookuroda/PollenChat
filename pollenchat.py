@@ -1,7 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PollenChat v2.8.9 — Clean CLI chat client for PollinationsAI
+PollenChat v2.8.10 — Clean CLI chat client for PollinationsAI
+
+Fixes in v2.8.10:
+  - _truncate_at_turn now requires 2+ turn markers (outside ``` blocks)
+    before truncating. This reduces false positives: a single role label
+    like "AI:" or "User:" in definitions / examples / translation tables
+    is no longer cut.  Note that text with 2+ labels (e.g. a translation
+    table with both "User:" and "AI:") is still truncated — use batch mode
+    or turn guard OFF for such content.
+  - stream_response: when exactly one marker is seen during streaming,
+    display is held back from that point onward until either (a) a second
+    marker confirms a fake turn (truncate) or (b) the stream ends with only
+    one marker (legitimate content — flush the held-back tail). This prevents
+    the first fake "User:" line from appearing on screen before truncation.
+  - Fixed: _find_turn_markers() now checks _turn_guard_enabled so guard OFF
+    no longer truncates or holds back display in stream mode.
+  - Turn guard now also ignores markers inside ``` code blocks.
+  - Improved [guard] help text and toggle message to warn about false
+    positives.
 
 Fixes in v2.8.9:
   - Added _read_input() with multi-line paste detection (POSIX only).
@@ -22,7 +40,7 @@ Fixes in v2.8.7:
   - [guard] command to toggle turn guard (default: ON)
 
 Fixes in v2.8.6:
-  - Removed \\001/\\002 ANSI wrapping in _rl_prompt() to prevent readline/libedit
+  - Removed \001/\002 ANSI wrapping in _rl_prompt() to prevent readline/libedit
     from mis-handling prompts and causing phantom auto-input on some terminals
 
 Fixes in v2.8.5:
@@ -94,9 +112,8 @@ init(autoreset=True)
 # (no effect on Windows without pyreadline, but harmless)
 try:
     import readline  # noqa: F401
-    _HAS_READLINE = True
 except ImportError:
-    _HAS_READLINE = False
+    pass
 
 # ============ CONFIG ============
 API_BASE = "https://text.pollinations.ai/openai"
@@ -144,7 +161,7 @@ BANNER = r"""
   / /_/ / ___/ //_/ _ \   / /   / __ \/ __ `/ __/
  / ____/ /__/ ,< /  __/  / /___/ / / / /_/ / /_
 /_/    \___/_/|_|\___/   \____/_/ /_/\__,_/\__/
-                                         v2.8.9
+                                         v2.8.10
          Clean & Harmless — Powered by PollinationsAI
 """
 
@@ -159,7 +176,7 @@ _temperature: float = 0.7
 _max_tokens: Optional[int] = None
 _stream_mode: bool = False  # default batch mode: safer on browser terminals
 _last_assistant_text: str = ""
-_turn_guard_enabled: bool = True  # stops AI from generating fake user/assistant turns
+_turn_guard_enabled: bool = False  # opt-in: stops AI from generating fake user/assistant turns
 
 # Image mode defaults (not persisted in config)
 _img_width: int = 1024
@@ -198,37 +215,115 @@ def _sanitize_session_name(name: str) -> str:
         name = name[:-5]
     return name or "untitled"
 
-def _rl_prompt(s: str) -> str:
-    """Return prompt as-is.
-
-    Previously this wrapped ANSI codes with \\001/\\002 for readline width
-    calculation, but some readline implementations (macOS libedit, etc.)
-    mishandle those markers and cause display glitches or phantom auto-input.
-    readline itself (arrow keys, history) still works; cursor position may
-    be slightly off during long prompts, but that is safer than broken input.
-    """
-    return s
-
-
-# Turn guard: some free-tier models keep generating fake User:/Assistant: turns.
-# We truncate the response at the first such marker so the UI does not loop.
+# Turn guard (opt-in via [guard]): some free-tier models keep generating fake
+# User:/Assistant: turns. We truncate the response at the first marker when
+# *two or more* such markers are found outside ``` code blocks. A single
+# marker is treated as legitimate content (definitions, examples, etc.).
 _TURN_RE = re.compile(
-    r"(?:^|\n)\s*(?:User|Assistant|AI)\s*[:：]",
+    r"\n[ \t]*(?:User|Assistant|AI)[ \t]*[:：]",
     re.IGNORECASE,
 )
+_TURN_WORDS = ("user", "assistant", "ai")
 
 
 def _truncate_at_turn(text: str) -> str:
-    """Truncate text at the first turn-marker if turn guard is enabled."""
+    """Truncate text at the first turn-marker if turn guard is enabled.
+
+    To reduce false positives (e.g. definitions like "AI: artificial
+    intelligence" or "User: 利用者"), we only truncate when *two or more*
+    turn markers are found outside ``` code blocks. A single marker is
+    treated as intentional content (definitions, examples, etc.).
+    """
     if not _turn_guard_enabled:
         return text
-    m = _TURN_RE.search(text)
-    return text[: m.start()] if m else text
+
+    # Collect markers that are NOT inside ``` code blocks
+    matches = []
+    for m in _TURN_RE.finditer(text):
+        backticks_before = text[: m.start()].count("```")
+        if backticks_before % 2 == 0:  # outside code block
+            matches.append(m)
+
+    # Need 2+ markers to be confident it is a fake conversation turn sequence.
+    # A lone marker is usually a definition, translation table, or example.
+    if len(matches) < 2:
+        return text
+
+    first = matches[0]
+    return text[: first.start()]
 
 
-def _ask(prompt_text: str) -> str:
-    """Wrapper around input()."""
-    return input(prompt_text).strip()
+def _find_turn_markers(text: str) -> list[int]:
+    """Return start positions of turn markers that are outside ``` blocks."""
+    if not _turn_guard_enabled:
+        return []
+    positions = []
+    for m in _TURN_RE.finditer(text):
+        if text[: m.start()].count("```") % 2 == 0:
+            positions.append(m.start())
+    return positions
+
+
+def _held_back_len(text: str) -> int:
+    """Length of the tail that may be the start of a turn marker split across
+    stream chunks (e.g. "\nUs" + "er:"). Streaming holds these back until the
+    next chunk shows whether they really are a marker."""
+    if not _turn_guard_enabled:
+        return 0
+    nl = text.rfind("\n")
+    if nl == -1:
+        return 0
+    tail = text[nl + 1:].lstrip(" \t").lower()
+    word = tail.rstrip(" \t")
+    if word == "" or any(w.startswith(word) for w in _TURN_WORDS):
+        return len(text) - nl
+    return 0
+
+
+def _pending_lines() -> list[str]:
+    """Return extra lines already waiting on stdin (i.e. pasted text).
+
+    Terminal paste is far faster than typing, so if more input arrives within
+    0.1s of the previous line it is treated as part of the same paste.
+    POSIX only: Windows select() does not support stdin, so nothing is
+    detected there (Windows paste behaviour is less prone to this issue).
+    """
+    extra: list[str] = []
+    if os.name != "posix":
+        return extra
+    import select
+    try:
+        while True:
+            readable, _, _ = select.select([sys.stdin], [], [], 0.1)
+            if sys.stdin not in readable:
+                break
+            try:
+                extra.append(input())
+            except EOFError:
+                break
+    except (OSError, ValueError):
+        pass
+    return extra
+
+
+def _ask(prompt_text: str, multiline: bool = False) -> str:
+    """Wrapper around input().
+
+    Extra pasted lines are not left in the buffer (they would otherwise leak
+    into the next prompt and be sent to the AI as separate messages). With
+    multiline=True they are joined into the answer; otherwise they are
+    discarded with a notice.
+    """
+    first = input(prompt_text)
+    extra = _pending_lines()
+    if extra:
+        if multiline:
+            return "\n".join([first] + extra).strip()
+        print(
+            f"{Fore.YELLOW}[~] Ignored {len(extra)} extra pasted line(s); "
+            f"only the first line was used.{Style.RESET_ALL}"
+        )
+    return first.strip()
 
 
 def _read_input() -> tuple[str, bool]:
@@ -243,25 +338,7 @@ def _read_input() -> tuple[str, bool]:
         (text, is_paste): text is the merged input, is_paste is True if
         multiple lines were detected and merged.
     """
-    lines = [input()]
-
-    # Pasted multi-line detection: on POSIX, select() can check if more stdin
-    # data is immediately available. Windows select() does not support stdin,
-    # so we skip detection there (pasted lines will still be fed one by one,
-    # but Windows terminal paste behaviour is less prone to this issue).
-    if os.name == "posix":
-        import select
-        try:
-            while True:
-                readable, _, _ = select.select([sys.stdin], [], [], 0.1)
-                if sys.stdin not in readable:
-                    break
-                try:
-                    lines.append(input())
-                except EOFError:
-                    break
-        except (OSError, ValueError):
-            pass
+    lines = [input()] + _pending_lines()
 
     is_paste = len(lines) > 1
     if is_paste:
@@ -525,10 +602,13 @@ def toggle_turn_guard() -> None:
     global _turn_guard_enabled
     _turn_guard_enabled = not _turn_guard_enabled
     status = "ON" if _turn_guard_enabled else "OFF"
-    print(
-        f"{Fore.GREEN}[OK] Turn guard: {status}{Style.RESET_ALL} "
-        f"(stops AI from generating fake user/assistant turns)"
-    )
+    print(f"{Fore.GREEN}[OK] Turn guard: {status}{Style.RESET_ALL}")
+    if _turn_guard_enabled:
+        print(
+            f"{Fore.YELLOW}    Note: May still cut legitimate text that contains "
+            f"multiple User:/Assistant:/AI: labels (e.g. definitions, "
+            f"translation tables). Use with care.{Style.RESET_ALL}"
+        )
 
 # ============ SESSION MANAGEMENT (multi-session) ============
 def _valid_history(history: object) -> bool:
@@ -737,12 +817,13 @@ def send_chat(
 
     headers = {
         "Content-Type": "application/json",
-        "User-Agent": "PollenChat/2.8.9",
+        "User-Agent": "PollenChat/2.8.10",
     }
 
     try:
         response = requests.post(
-            API_BASE, headers=headers, json=payload, stream=stream, timeout=60
+            API_BASE, headers=headers, json=payload, stream=stream,
+            timeout=(10, 60) if stream else (10, 180),  # (connect, read)
         )
         response.raise_for_status()
         return response
@@ -760,8 +841,16 @@ def send_chat(
         return None
 
 def stream_response(response: requests.Response) -> tuple[str, bool]:
-    full_text = ""
+    full_text = ""   # accepted text (after turn-guard truncation)
+    shown = 0        # how many chars of full_text are already on screen
     completed = False
+    stopped = False
+    finished = False  # saw [DONE] or a finish_reason
+
+    def _emit(s: str) -> None:
+        if s:
+            sys.stdout.write(Fore.MAGENTA + s + Style.RESET_ALL)
+            sys.stdout.flush()
 
     try:
         for line in response.iter_lines(decode_unicode=False):
@@ -772,6 +861,7 @@ def stream_response(response: requests.Response) -> tuple[str, bool]:
                 continue
             data_str = text_line[5:].strip()
             if data_str == "[DONE]":
+                finished = True
                 break
             try:
                 data = json.loads(data_str)
@@ -785,23 +875,61 @@ def stream_response(response: requests.Response) -> tuple[str, bool]:
             first = choices[0]
             if not isinstance(first, dict):
                 continue
+            if first.get("finish_reason"):
+                finished = True
             delta = first.get("delta")
             if not isinstance(delta, dict):
                 continue
             content = delta.get("content") or ""
-            if content:
-                sys.stdout.write(Fore.MAGENTA + content + Style.RESET_ALL)
-                sys.stdout.flush()
-                full_text += content
-                # Turn guard: stop if the accumulated text hits a fake turn marker
-                full_text = _truncate_at_turn(full_text)
+            if not content:
+                continue
+
+            candidate = full_text + content
+            marker_positions = _find_turn_markers(candidate)
+
+            if len(marker_positions) >= 2:
+                # Two or more markers: definitely a fake turn sequence.
+                # Truncate at the first marker and stop reading.
+                full_text = candidate[: marker_positions[0]]
+                stopped = True
+                _emit(full_text[shown:])
+                shown = len(full_text)
+                break
+            elif len(marker_positions) == 1:
+                # Exactly one marker: hold back everything from the marker onward.
+                # If a second marker arrives later we will truncate here;
+                # if the stream ends with only one marker it was legitimate content
+                # (definition, example, etc.) and we flush the held-back tail at the end.
+                full_text = candidate
+                pos = marker_positions[0]
+                if pos > shown:
+                    _emit(full_text[shown:pos])
+                    shown = pos
+            else:
+                # No markers yet: normal streaming with held-back tail
+                full_text = candidate
+                safe = len(full_text) - _held_back_len(full_text)
+                if safe > shown:
+                    _emit(full_text[shown:safe])
+                    shown = safe
+
+        if not stopped:
+            _emit(full_text[shown:])  # flush any held-back tail
         completed = True
         print()
+        if stopped:
+            print(f"{Fore.YELLOW}[~] Turn guard stopped fake turn generation.{Style.RESET_ALL}")
+        elif not finished:
+            print(
+                f"{Fore.YELLOW}[~] Stream ended without [DONE]; "
+                f"the response may be cut off.{Style.RESET_ALL}"
+            )
     except KeyboardInterrupt:
         print(f"\n{Fore.YELLOW}[!] Interrupted by user.{Style.RESET_ALL}")
     except requests.exceptions.RequestException as e:
         print(f"\n{Fore.RED}[!] Stream error: {e}{Style.RESET_ALL}")
     finally:
+        response.close()
         # Defensive flush: on some terminal emulators (e.g. Colab xterm.js)
         # streamed output can leak into the next input() buffer.
         sys.stdout.flush()
@@ -1004,7 +1132,6 @@ def export_session() -> None:
 
 # ============ IMPORT ============
 def import_file() -> None:
-    global _last_assistant_text
     raw_path = _ask(f"{Fore.CYAN}[+] File path: {Style.RESET_ALL}")
     # Strip surrounding quotes that shell or copy-paste may add
     raw_path = raw_path.strip("'\"")
@@ -1039,7 +1166,8 @@ def import_file() -> None:
     print(f"{Fore.CYAN}[Preview]:{Style.RESET_ALL} {preview}{suffix}\n")
 
     extra = _ask(
-        f"{Fore.CYAN}[+] Question about this file (Enter to send file content only): {Style.RESET_ALL}"
+        f"{Fore.CYAN}[+] Question about this file (Enter to send file content only): {Style.RESET_ALL}",
+        multiline=True,
     )
 
     full_input = f"{content}\n\n{extra}" if extra else content
@@ -1359,7 +1487,9 @@ PollenChat Commands:
   [system]      — Set or view the system prompt
   [config]      — Set temperature / max_tokens
   [stream]      — Toggle streaming / batch display mode (batch recommended on web terminals)
-  [guard]       — Toggle turn guard (stops fake user/assistant turns)
+  [guard]       — Toggle turn guard (default OFF). Stops models that spontaneously
+                  generate fake User:/Assistant: turns. Requires 2+ role labels
+                  outside code blocks before cutting (reduces false positives).
   [image]       — Enter image generation mode
   [long]        — Enter multiline input mode (type [end] to finish)
   [import]      — Import a .md/.txt file and send as user message
@@ -1423,9 +1553,6 @@ def main() -> None:
     try:
         while True:
             try:
-                # Defensive flush before prompt: ensure no stray output
-                # leaks into input() on browser-based terminals (xterm.js, etc.)
-                sys.stdout.flush()
                 # Defensive flush before prompt: ensure no stray output
                 # leaks into input() on browser-based terminals (xterm.js, etc.)
                 sys.stdout.flush()
