@@ -1,0 +1,27 @@
+[model]      — モデル選択
+[system]     — システムプロンプト設定
+[config]     — temperature / max_tokens
+[stream]     — ストリーミングON/OFF
+[image]      — 画像生成（[size] / [seed] 対応）
+[long]       — マルチライン入力
+[import]     — 外部ファイル投入（プレビュー付き）
+[search]     — 会話検索
+[render]     — Markdown整形再表示
+[savecode]   — コードブロック抽出保存
+[export]     — Markdownエクスポート
+[undo]       — 直前のやり取り削除
+[token]      — 概算トークン数表示
+
+--- セッション管理 ---
+[sessions]   — セッション一覧
+[switch]     — セッション切り替え
+[new]        — 新規セッション作成
+[rename]     — セッション名変更
+[delete]     — セッション削除
+[save]       — 手動保存（レガシー）
+[load]       — 手動読込（レガシー）
+
+[clear]      — 現在のセッション履歴クリア
+[history]    — 現在のセッション履歴表示
+[help]       — ヘルプ
+[exit]       — 終了（自動保存あり）
