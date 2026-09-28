@@ -1,19 +1,54 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PollenChat v2.8.1 — Clean CLI chat client for PollinationsAI
-Fixes in v2.8.1:
-  - Fix missing `global` declarations in load_session() and rename_session()
-  - rename_session() now removes the old session file to avoid orphan files
-  - Clarify that config (model/system/temperature/max_tokens) is session-agnostic
+PollenChat v2.8.5 — Clean CLI chat client for PollinationsAI
+
+Fixes in v2.8.5:
+  - [save]: assign _sessions[name] BEFORE _save_session_atomic() so the new file
+    is no longer written with an empty (or stale) history
+  - main prompt now goes through _ask() like every other prompt
+
+Fixes in v2.8.4:
+  - _rl_prompt() is now conditional: only wraps ANSI codes when readline is present
+  - All colored input() prompts go through _rl_prompt() for consistent readline safety
+  - [size] validates dimensions before assigning to _img_width/_img_height
+  - [rename] skips os.remove() when old and new resolve to the same file
+  - _sanitize_session_name strips trailing .json so keys stay consistent
+  - [save] now uses _save_session_atomic() for crash-safe writes
+  - stream_response hardened against non-list choices / non-dict delta
+
+Fixes in v2.8.3:
+  - _auto_load_all_sessions() moved after banner so broken-JSON warnings are visible
+  - rename_session: save new session before removing old file (crash safety)
+  - undo_last / clear_history: auto-save current session immediately
+  - readline-safe ANSI prompt wrapper to prevent display glitches
+  - stream_response: guard against non-dict JSON payloads
+  - [save]: sanitize session name with _sanitize_session_name
+  - [system]: empty-input guard with .strip()
+  - [size]: validate dimensions at input time
+  - HELP_TEXT: add missing em-dash for [model]
+
+Fixes in v2.8.2:
+  - [long] / [system] now use [end] terminator (empty lines are preserved)
+  - [save] copy-on-write to avoid shared list references
+  - [clear] resets _last_assistant_text so [render]/[savecode] don't see stale data
+  - generate_image: quote(prompt, safe="") to handle slashes in prompts
+  - Atomic per-session auto-save after every successful chat_once
+  - _auto_load_all_sessions warns about broken JSON instead of silently skipping
+  - batch_response / stream_response guard against malformed choices
+  - Image size validation (64–4096)
+  - Seed=0 is now handled correctly (0 is falsy but valid)
+  - import_file: expand ~ and strip surrounding quotes from path
+  - readline support on Unix for arrow-key editing
+  - rename_session early-return when name is unchanged
+  - estimate_tokens notes MAX_HISTORY limit
+  - _prompt_float unused "current" argument removed
+
 New features in v2.8:
   - Multi-session management: [sessions] [switch] [new] [rename] [delete]
   - Auto-load all sessions on startup, auto-save all on exit
   - Session name shown in the prompt
-Fixes from v2.7.1:
-  - Add file content preview after [import] load
-  - Exclude bool from max_tokens type check
-  - Harden _safe_filename against illegal chars
+
 API Docs: https://github.com/pollinations/pollinations/blob/master/APIDOCS.md
 """
 
@@ -32,6 +67,14 @@ from urllib.parse import quote
 from colorama import init, Fore, Style
 
 init(autoreset=True)
+
+# Enable line editing / history on Unix terminals
+# (no effect on Windows without pyreadline, but harmless)
+try:
+    import readline  # noqa: F401
+    _HAS_READLINE = True
+except ImportError:
+    _HAS_READLINE = False
 
 # ============ CONFIG ============
 API_BASE = "https://text.pollinations.ai/openai"
@@ -79,7 +122,7 @@ BANNER = r"""
   / /_/ / ___/ //_/ _ \   / /   / __ \/ __ `/ __/
  / ____/ /__/ ,< /  __/  / /___/ / / / /_/ / /_
 /_/    \___/_/|_|\___/   \____/_/ /_/\__,_/\__/
-                                         v2.8.1
+                                         v2.8.5
          Clean & Harmless — Powered by PollinationsAI
 """
 
@@ -127,7 +170,24 @@ def _safe_filename(name: str) -> str:
 def _sanitize_session_name(name: str) -> str:
     name = name.strip()
     name = re.sub(r'[\\/:*?"<>|]', "_", name)
+    # Strip trailing .json so "foo.json" becomes "foo" and stays consistent
+    if name.lower().endswith(".json"):
+        name = name[:-5]
     return name or "untitled"
+
+def _rl_prompt(s: str) -> str:
+    """Wrap ANSI escape sequences with \001/\002 for readline display-width safety.
+
+    On platforms without readline (e.g. Windows without pyreadline) the wrapper
+    is skipped so control characters do not leak into the prompt.
+    """
+    if not _HAS_READLINE:
+        return s
+    return re.sub(r"(\x1b\[[0-9;]*m)", r"\001\1\002", s)
+
+def _ask(prompt_text: str) -> str:
+    """Wrapper around input() that applies _rl_prompt() automatically."""
+    return input(_rl_prompt(prompt_text)).strip()
 
 # ============ CONFIG ============
 def load_config() -> dict:
@@ -259,9 +319,9 @@ def select_model() -> None:
         marker = f"{Fore.GREEN}*{Style.RESET_ALL}" if m == current_model else " "
         print(f"  [{marker}] {i}. {m}")
 
-    choice = input(
+    choice = _ask(
         f"\n{Fore.CYAN}[+] Select model (number or name, Enter to keep {current_model}): {Style.RESET_ALL}"
-    ).strip()
+    )
     if not choice:
         return
 
@@ -283,7 +343,10 @@ def set_system_prompt() -> None:
     global _system_prompt
     print(f"\n{Fore.YELLOW}Current system prompt:{Style.RESET_ALL}")
     print(f"  {_system_prompt}\n")
-    print(f"{Fore.CYAN}Enter new prompt (empty line = keep, [reset] = default):{Style.RESET_ALL}")
+    print(
+        f"{Fore.CYAN}Enter new prompt. "
+        f"Type [end] to finish, [reset] for default:{Style.RESET_ALL}"
+    )
     lines = []
     while True:
         try:
@@ -295,20 +358,21 @@ def set_system_prompt() -> None:
             print(f"{Fore.GREEN}[OK] System prompt reset to default.{Style.RESET_ALL}")
             save_config(build_config())
             return
-        if line == "":
+        if line.strip() == "[end]":
             break
         lines.append(line)
-    if lines:
-        _system_prompt = "\n".join(lines)
+    joined = "\n".join(lines).strip()
+    if joined:
+        _system_prompt = joined
         print(f"{Fore.GREEN}[OK] System prompt updated.{Style.RESET_ALL}")
         save_config(build_config())
     else:
         print(f"{Fore.YELLOW}[~] Kept current prompt.{Style.RESET_ALL}")
 
 # ============ CONFIG (temperature / max_tokens) ============
-def _prompt_float(current: float, prompt_text: str, min_val: float, max_val: float) -> Optional[float]:
+def _prompt_float(prompt_text: str, min_val: float, max_val: float) -> Optional[float]:
     while True:
-        raw = input(prompt_text).strip()
+        raw = _ask(prompt_text)
         if raw == "":
             return None
         try:
@@ -323,7 +387,7 @@ def _prompt_float(current: float, prompt_text: str, min_val: float, max_val: flo
 
 def _prompt_optional_int(prompt_text: str) -> Optional[int]:
     while True:
-        raw = input(prompt_text).strip().lower()
+        raw = _ask(prompt_text).lower()
         if raw == "":
             return None
         if raw == "none":
@@ -342,11 +406,10 @@ def edit_config() -> None:
     global _temperature, _max_tokens
     print(f"\n{Fore.YELLOW}Current configuration:{Style.RESET_ALL}")
     print(f"  temperature : {_temperature}")
-    mt = str(_max_tokens) if _max_tokens else "(unset / server default)"
+    mt = str(_max_tokens) if _max_tokens is not None else "(unset / server default)"
     print(f"  max_tokens  : {mt}\n")
 
     new_temp = _prompt_float(
-        _temperature,
         f"{Fore.CYAN}[+] temperature (current: {_temperature}, Enter=keep, 0.0-2.0): {Style.RESET_ALL}",
         0.0, 2.0,
     )
@@ -359,7 +422,7 @@ def edit_config() -> None:
     )
     if new_mt == -1:
         _max_tokens = None
-        print(f"{Fore.GREEN}[!] max_tokens unset (server default){Style.RESET_ALL}")
+        print(f"{Fore.GREEN}[OK] max_tokens unset (server default){Style.RESET_ALL}")
     elif new_mt is not None:
         _max_tokens = new_mt
         print(f"{Fore.GREEN}[OK] max_tokens set to {_max_tokens}{Style.RESET_ALL}")
@@ -387,8 +450,31 @@ def _valid_history(history: object) -> bool:
             return False
     return True
 
+def _save_session_atomic(name: str) -> None:
+    """Save a single session atomically (write to temp, then rename)."""
+    history = _sessions.get(name, [])
+    fname = _safe_session_name(name)
+    tmp_path = os.path.join(SESSION_DIR, f".{fname}.tmp")
+    path = os.path.join(SESSION_DIR, fname)
+    data = {
+        "model": current_model,
+        "username": username,
+        "system_prompt": _system_prompt,
+        "temperature": _temperature,
+        "max_tokens": _max_tokens,
+        "history": history,
+        "saved_at": datetime.datetime.now().isoformat(),
+    }
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+    except OSError as e:
+        print(f"{Fore.RED}[!] Failed to save '{name}': {e}{Style.RESET_ALL}")
+
 def _auto_load_all_sessions() -> None:
     global _sessions, _current_session
+    _sessions = {}
     files = sorted(f for f in os.listdir(SESSION_DIR) if f.endswith(".json"))
     loaded_any = False
     for fname in files:
@@ -401,8 +487,16 @@ def _auto_load_all_sessions() -> None:
                 name = fname[:-5]
                 _sessions[name] = history
                 loaded_any = True
-        except Exception:
-            continue
+            else:
+                print(
+                    f"{Fore.YELLOW}[!] Skipped '{fname}': invalid history format.{Style.RESET_ALL}"
+                )
+        except json.JSONDecodeError as e:
+            print(
+                f"{Fore.YELLOW}[!] Skipped '{fname}': JSON error ({e}).{Style.RESET_ALL}"
+            )
+        except Exception as e:
+            print(f"{Fore.YELLOW}[!] Skipped '{fname}': {e}.{Style.RESET_ALL}")
     if not loaded_any:
         _sessions = {"default": []}
         _current_session = "default"
@@ -413,26 +507,8 @@ def _auto_load_all_sessions() -> None:
             _current_session = sorted(_sessions.keys())[0]
 
 def _auto_save_all_sessions() -> None:
-    # Note: model/system_prompt/temperature/max_tokens are session-agnostic.
-    # They are saved with each session file for convenience, but changing them
-    # in one session affects all sessions (they are global settings).
-    for name, history in _sessions.items():
-        fname = _safe_session_name(name)
-        path = os.path.join(SESSION_DIR, fname)
-        data = {
-            "model": current_model,
-            "username": username,
-            "system_prompt": _system_prompt,
-            "temperature": _temperature,
-            "max_tokens": _max_tokens,
-            "history": history,
-            "saved_at": datetime.datetime.now().isoformat(),
-        }
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-        except OSError as e:
-            print(f"{Fore.RED}[!] Failed to save '{name}': {e}{Style.RESET_ALL}")
+    for name in _sessions:
+        _save_session_atomic(name)
 
 def list_sessions() -> None:
     print(f"\n{Fore.YELLOW}Sessions:{Style.RESET_ALL}")
@@ -445,7 +521,7 @@ def list_sessions() -> None:
 def switch_session() -> None:
     global _current_session, _last_assistant_text
     list_sessions()
-    choice = input(f"{Fore.CYAN}[+] Switch to (number or name): {Style.RESET_ALL}").strip()
+    choice = _ask(f"{Fore.CYAN}[+] Switch to (number or name): {Style.RESET_ALL}")
     if not choice:
         return
     names = sorted(_sessions.keys())
@@ -458,23 +534,30 @@ def switch_session() -> None:
             return
     else:
         if choice not in _sessions:
-            print(f"{Fore.RED}[!] Session '{choice}' not found. Use [new] to create.{Style.RESET_ALL}")
+            print(
+                f"{Fore.RED}[!] Session '{choice}' not found. Use [new] to create.{Style.RESET_ALL}"
+            )
             return
         name = choice
 
     _current_session = name
     _last_assistant_text = _session_last_text.get(name, "")
-    print(f"{Fore.GREEN}[OK] Switched to '{_current_session}' ({len(_sessions[_current_session])} messages){Style.RESET_ALL}")
+    print(
+        f"{Fore.GREEN}[OK] Switched to '{_current_session}' "
+        f"({len(_sessions[_current_session])} messages){Style.RESET_ALL}"
+    )
 
 def new_session() -> None:
     global _current_session, _last_assistant_text
-    name = input(f"{Fore.CYAN}[+] New session name: {Style.RESET_ALL}").strip()
+    name = _ask(f"{Fore.CYAN}[+] New session name: {Style.RESET_ALL}")
     if not name:
         print(f"{Fore.RED}[!] Name cannot be empty.{Style.RESET_ALL}")
         return
     name = _sanitize_session_name(name)
     if name in _sessions:
-        print(f"{Fore.YELLOW}[!] Session '{name}' already exists. Switched to it.{Style.RESET_ALL}")
+        print(
+            f"{Fore.YELLOW}[!] Session '{name}' already exists. Switched to it.{Style.RESET_ALL}"
+        )
         _current_session = name
         _last_assistant_text = _session_last_text.get(name, "")
         return
@@ -486,37 +569,51 @@ def new_session() -> None:
 def rename_session() -> None:
     global _current_session
     old = _current_session
-    new = input(f"{Fore.CYAN}[+] Rename '{old}' to: {Style.RESET_ALL}").strip()
+    new = _ask(f"{Fore.CYAN}[+] Rename '{old}' to: {Style.RESET_ALL}")
     if not new:
         return
     new = _sanitize_session_name(new)
-    if new in _sessions and new != old:
+    if new == old:
+        print(f"{Fore.YELLOW}[~] Same name. No change.{Style.RESET_ALL}")
+        return
+    if new in _sessions:
         print(f"{Fore.RED}[!] Name '{new}' already exists.{Style.RESET_ALL}")
         return
     _sessions[new] = _sessions.pop(old)
     _session_last_text[new] = _session_last_text.pop(old, "")
     _current_session = new
 
+    # Save new session BEFORE removing old file so a crash won't lose data
+    _save_session_atomic(new)
+
     # Remove old session file to avoid orphan files
     old_path = os.path.join(SESSION_DIR, _safe_session_name(old))
+    new_path = os.path.join(SESSION_DIR, _safe_session_name(new))
     try:
         if os.path.exists(old_path):
-            os.remove(old_path)
+            # On case-insensitive filesystems (Windows/macOS) renaming "work" → "Work"
+            # resolves to the same physical file.  Skip deletion so we don't nuke the
+            # newly-written session.
+            try:
+                same = os.path.samefile(old_path, new_path)
+            except (OSError, ValueError):
+                same = False
+            if not same:
+                os.remove(old_path)
     except OSError as e:
         print(f"{Fore.YELLOW}[!] Could not remove old file: {e}{Style.RESET_ALL}")
 
     print(f"{Fore.GREEN}[OK] Renamed '{old}' → '{new}'{Style.RESET_ALL}")
 
 def delete_session() -> None:
-    global _current_session
-    name = input(f"{Fore.CYAN}[+] Delete session (name, Enter=cancel): {Style.RESET_ALL}").strip()
+    name = _ask(f"{Fore.CYAN}[+] Delete session (name, Enter=cancel): {Style.RESET_ALL}")
     if not name or name not in _sessions:
         print(f"{Fore.YELLOW}[~] Cancelled or not found.{Style.RESET_ALL}")
         return
     if name == _current_session:
         print(f"{Fore.RED}[!] Cannot delete the current session.{Style.RESET_ALL}")
         return
-    confirm = input(f"{Fore.RED}[!] Really delete '{name}'? type 'yes': {Style.RESET_ALL}").strip()
+    confirm = _ask(f"{Fore.RED}[!] Really delete '{name}'? type 'yes': {Style.RESET_ALL}")
     if confirm != "yes":
         print(f"{Fore.YELLOW}[~] Cancelled.{Style.RESET_ALL}")
         return
@@ -547,7 +644,7 @@ def send_chat(
 
     headers = {
         "Content-Type": "application/json",
-        "User-Agent": "PollenChat/2.8.1",
+        "User-Agent": "PollenChat/2.8.5",
     }
 
     try:
@@ -587,13 +684,22 @@ def stream_response(response: requests.Response) -> tuple[str, bool]:
                 data = json.loads(data_str)
             except json.JSONDecodeError:
                 continue
-            choices = data.get("choices") or []
-            if choices:
-                content = (choices[0].get("delta") or {}).get("content") or ""
-                if content:
-                    sys.stdout.write(Fore.MAGENTA + content + Style.RESET_ALL)
-                    sys.stdout.flush()
-                    full_text += content
+            if not isinstance(data, dict):
+                continue
+            choices = data.get("choices")
+            if not isinstance(choices, list) or not choices:
+                continue
+            first = choices[0]
+            if not isinstance(first, dict):
+                continue
+            delta = first.get("delta")
+            if not isinstance(delta, dict):
+                continue
+            content = delta.get("content") or ""
+            if content:
+                sys.stdout.write(Fore.MAGENTA + content + Style.RESET_ALL)
+                sys.stdout.flush()
+                full_text += content
         completed = True
         print()
     except KeyboardInterrupt:
@@ -606,13 +712,15 @@ def batch_response(response: requests.Response) -> tuple[str, bool]:
     try:
         data = response.json()
         choices = data.get("choices") or []
-        if choices:
-            content = choices[0].get("message", {}).get("content", "")
-            if content:
-                print(Fore.MAGENTA + content + Style.RESET_ALL)
-                return content, True
+        if choices and isinstance(choices[0], dict):
+            message = choices[0].get("message") or {}
+            if isinstance(message, dict):
+                content = message.get("content", "")
+                if content:
+                    print(Fore.MAGENTA + content + Style.RESET_ALL)
+                    return content, True
         return "", True
-    except (json.JSONDecodeError, KeyError, requests.exceptions.RequestException) as e:
+    except (json.JSONDecodeError, KeyError, AttributeError, requests.exceptions.RequestException) as e:
         print(f"{Fore.RED}[!] Batch response error: {e}{Style.RESET_ALL}")
         return "", False
 
@@ -661,6 +769,7 @@ def chat_once(user_input: str) -> bool:
     _sessions[_current_session].append({"role": "assistant", "content": assistant_text})
     _last_assistant_text = assistant_text
     _session_last_text[_current_session] = assistant_text
+    _save_session_atomic(_current_session)  # auto-save after every exchange
     return True
 
 # ============ RENDER LAST RESPONSE ============
@@ -687,7 +796,9 @@ def save_code() -> None:
 
     blocks = _extract_code_blocks(_last_assistant_text)
     if not blocks:
-        print(f"{Fore.YELLOW}[~] No code blocks (```...```) found in last response.{Style.RESET_ALL}")
+        print(
+            f"{Fore.YELLOW}[~] No code blocks (```...```) found in last response.{Style.RESET_ALL}"
+        )
         return
 
     print(f"\n{Fore.YELLOW}Code blocks found: {len(blocks)}{Style.RESET_ALL}")
@@ -698,9 +809,9 @@ def save_code() -> None:
         suffix = "..." if len(code_text) > 80 else ""
         print(f"  {i}. [{lang_display}] {line_count} lines — {preview}{suffix}")
 
-    choice = input(
+    choice = _ask(
         f"\n{Fore.CYAN}[+] Select block number (Enter = 1, [all] = save each): {Style.RESET_ALL}"
-    ).strip()
+    )
 
     if choice.lower() == "all":
         saved = []
@@ -730,9 +841,7 @@ def save_code() -> None:
     lang, code_text = blocks[idx]
     ext = _guess_extension(lang)
     default_name = f"snippet{ext}"
-    raw_name = input(
-        f"{Fore.CYAN}[+] Filename (Enter for '{default_name}'): {Style.RESET_ALL}"
-    ).strip()
+    raw_name = _ask(f"{Fore.CYAN}[+] Filename (Enter for '{default_name}'): {Style.RESET_ALL}")
     fname = _safe_filename(raw_name) if raw_name else default_name
     if not os.path.splitext(fname)[1]:
         fname += ext
@@ -751,7 +860,7 @@ def export_session() -> None:
         print(f"{Fore.YELLOW}[~] No conversation to export.{Style.RESET_ALL}")
         return
 
-    raw = input(f"{Fore.CYAN}[+] Export filename (Enter for auto): {Style.RESET_ALL}").strip()
+    raw = _ask(f"{Fore.CYAN}[+] Export filename (Enter for auto): {Style.RESET_ALL}")
     if raw:
         fname = _safe_filename(raw)
         if not fname.endswith(".md"):
@@ -762,9 +871,9 @@ def export_session() -> None:
 
     include_system = False
     if _system_prompt:
-        sp_choice = input(
+        sp_choice = _ask(
             f"{Fore.CYAN}[+] Include system prompt in export? y/N: {Style.RESET_ALL}"
-        ).strip().lower()
+        ).lower()
         include_system = sp_choice == "y"
 
     lines = []
@@ -792,7 +901,10 @@ def export_session() -> None:
 # ============ IMPORT ============
 def import_file() -> None:
     global _last_assistant_text
-    path = input(f"{Fore.CYAN}[+] File path: {Style.RESET_ALL}").strip()
+    raw_path = _ask(f"{Fore.CYAN}[+] File path: {Style.RESET_ALL}")
+    # Strip surrounding quotes that shell or copy-paste may add
+    raw_path = raw_path.strip("'\"")
+    path = os.path.expanduser(raw_path)
     if not path or not os.path.isfile(path):
         print(f"{Fore.RED}[!] File not found.{Style.RESET_ALL}")
         return
@@ -804,9 +916,9 @@ def import_file() -> None:
 
     size = os.path.getsize(path)
     if size > IMPORT_MAX_BYTES:
-        confirm = input(
+        confirm = _ask(
             f"{Fore.YELLOW}[!] {size:,} bytes. Continue? y/N: {Style.RESET_ALL}"
-        ).strip().lower()
+        ).lower()
         if confirm != "y":
             return
 
@@ -822,9 +934,9 @@ def import_file() -> None:
     suffix = "..." if len(content) > 200 else ""
     print(f"{Fore.CYAN}[Preview]:{Style.RESET_ALL} {preview}{suffix}\n")
 
-    extra = input(
+    extra = _ask(
         f"{Fore.CYAN}[+] Question about this file (Enter to send file content only): {Style.RESET_ALL}"
-    ).strip()
+    )
 
     full_input = f"{content}\n\n{extra}" if extra else content
     chat_once(full_input)
@@ -845,6 +957,7 @@ def undo_last() -> None:
 
     _last_assistant_text = ""
     _session_last_text[_current_session] = ""
+    _save_session_atomic(_current_session)  # persist immediately
     print(
         f"{Fore.GREEN}[OK] Undid last exchange ({len(removed)} message(s)). "
         f"History now: {len(history)} messages.{Style.RESET_ALL}"
@@ -863,7 +976,10 @@ def estimate_tokens() -> None:
     print(f"  Total characters   : {total_chars:,}")
     print(f"  ASCII chars        : {ascii_chars:,}")
     print(f"  Non-ASCII chars    : {non_ascii_chars:,}")
-    print(f"{Fore.YELLOW}  ※ This is a rough estimate. Actual tokenizer counts may differ.{Style.RESET_ALL}\n")
+    print(
+        f"{Fore.YELLOW}  ※ Rough estimate. "
+        f"Actual API sends only last {MAX_HISTORY} messages (plus system).{Style.RESET_ALL}\n"
+    )
 
 # ============ IMAGE GENERATION ============
 def _ext_from_content_type(content_type: str) -> str:
@@ -885,7 +1001,11 @@ def generate_image(
     h = height if height is not None else _img_height
     s = seed if seed is not None else (_img_seed if _img_seed is not None else random.randint(1, 999999))
 
-    encoded_prompt = quote(prompt)
+    if w < 64 or h < 64 or w > 4096 or h > 4096:
+        print(f"{Fore.RED}[!] Image size must be between 64 and 4096.{Style.RESET_ALL}")
+        return None
+
+    encoded_prompt = quote(prompt, safe="")
     url = (
         f"{IMAGE_BASE}/{encoded_prompt}"
         f"?width={w}&height={h}&seed={s}"
@@ -900,7 +1020,9 @@ def generate_image(
     try:
         r = requests.get(url, timeout=60)
         if r.status_code != 200:
-            print(f"{Fore.RED}[!] Failed to generate image: HTTP {r.status_code}{Style.RESET_ALL}")
+            print(
+                f"{Fore.RED}[!] Failed to generate image: HTTP {r.status_code}{Style.RESET_ALL}"
+            )
             return None
 
         content_type = r.headers.get("Content-Type", "")
@@ -927,13 +1049,16 @@ def image_mode() -> None:
     global _img_width, _img_height, _img_seed
 
     print(f"\n{Fore.YELLOW}Image Generation Mode{Style.RESET_ALL}")
-    print(f"  Current: {_img_width}x{_img_height}, seed={_img_seed if _img_seed else 'random'}\n")
+    print(
+        f"  Current: {_img_width}x{_img_height}, "
+        f"seed={_img_seed if _img_seed is not None else 'random'}\n"
+    )
     print("  Type your prompt, 'exit' to leave, or:")
     print("  [size] — change width/height")
     print("  [seed] — set/clear a fixed seed\n")
 
     while True:
-        prompt = input(f"{Fore.CYAN}[image] {username}: {Style.RESET_ALL}").strip()
+        prompt = _ask(f"{Fore.CYAN}[image] {username}: {Style.RESET_ALL}")
         if not prompt:
             continue
 
@@ -942,18 +1067,33 @@ def image_mode() -> None:
             print(f"{Fore.YELLOW}[~] Returning to chat mode.{Style.RESET_ALL}\n")
             break
         elif cmd in ("[size]", "size"):
-            w_input = input(f"{Fore.CYAN}[+] width (current: {_img_width}): {Style.RESET_ALL}").strip()
-            h_input = input(f"{Fore.CYAN}[+] height (current: {_img_height}): {Style.RESET_ALL}").strip()
-            if w_input.isdigit():
-                _img_width = int(w_input)
-            if h_input.isdigit():
-                _img_height = int(h_input)
+            w_input = _ask(
+                f"{Fore.CYAN}[+] width (current: {_img_width}): {Style.RESET_ALL}"
+            )
+            h_input = _ask(
+                f"{Fore.CYAN}[+] height (current: {_img_height}): {Style.RESET_ALL}"
+            )
+            # Validate in temporary variables before mutating state
+            try:
+                w_tmp = int(w_input) if w_input else _img_width
+                h_tmp = int(h_input) if h_input else _img_height
+            except ValueError:
+                print(f"{Fore.RED}[!] Width and height must be integers.{Style.RESET_ALL}")
+                continue
+            if w_tmp < 64 or h_tmp < 64 or w_tmp > 4096 or h_tmp > 4096:
+                print(
+                    f"{Fore.RED}[!] Size must be between 64 and 4096. "
+                    f"Tried: {w_tmp}x{h_tmp}{Style.RESET_ALL}"
+                )
+                continue
+            _img_width, _img_height = w_tmp, h_tmp
             print(f"{Fore.GREEN}[OK] Size set to {_img_width}x{_img_height}{Style.RESET_ALL}")
             continue
         elif cmd in ("[seed]", "seed"):
-            s_input = input(
-                f"{Fore.CYAN}[+] seed (current: {_img_seed if _img_seed else 'random'}, 'none'=random): {Style.RESET_ALL}"
-            ).strip()
+            s_input = _ask(
+                f"{Fore.CYAN}[+] seed (current: "
+                f"{_img_seed if _img_seed is not None else 'random'}, 'none'=random): {Style.RESET_ALL}"
+            )
             if s_input.lower() == "none":
                 _img_seed = None
                 print(f"{Fore.GREEN}[OK] Seed set to random{Style.RESET_ALL}")
@@ -968,21 +1108,24 @@ def image_mode() -> None:
 
 # ============ MULTILINE INPUT ============
 def read_multiline() -> str:
-    print(f"{Fore.CYAN}[+] Multiline mode. Enter text, then a blank line to finish:{Style.RESET_ALL}")
+    print(
+        f"{Fore.CYAN}[+] Multiline mode. "
+        f"Type [end] on its own line to finish:{Style.RESET_ALL}"
+    )
     lines = []
     while True:
         try:
             line = input()
         except EOFError:
             break
-        if line == "":
+        if line.strip() == "[end]":
             break
         lines.append(line)
     return "\n".join(lines)
 
 # ============ SEARCH ============
 def search_history() -> None:
-    query = input(f"{Fore.CYAN}[+] Search keyword: {Style.RESET_ALL}").strip().lower()
+    query = _ask(f"{Fore.CYAN}[+] Search keyword: {Style.RESET_ALL}").lower()
     if not query:
         print(f"{Fore.YELLOW}[~] Empty query.{Style.RESET_ALL}")
         return
@@ -1007,29 +1150,26 @@ def search_history() -> None:
 
 # ============ LEGACY SESSION SAVE/LOAD ============
 def save_session() -> None:
-    raw = input(f"{Fore.CYAN}[+] Save current session as (Enter='{_current_session}'): {Style.RESET_ALL}").strip()
-    name = raw or _current_session
+    raw = _ask(
+        f"{Fore.CYAN}[+] Save current session as (Enter='{_current_session}'): {Style.RESET_ALL}"
+    )
+    name = _sanitize_session_name(raw) if raw else _current_session
     fname = _safe_session_name(name)
     path = os.path.join(SESSION_DIR, fname)
 
-    data = {
-        "model": current_model,
-        "username": username,
-        "system_prompt": _system_prompt,
-        "temperature": _temperature,
-        "max_tokens": _max_tokens,
-        "history": _sessions[_current_session],
-        "saved_at": datetime.datetime.now().isoformat(),
-    }
+    if name != _current_session and name in _sessions:
+        confirm = _ask(
+            f"{Fore.YELLOW}[!] '{name}' already exists. Overwrite? y/N: {Style.RESET_ALL}"
+        ).lower()
+        if confirm != "y":
+            print(f"{Fore.YELLOW}[~] Cancelled.{Style.RESET_ALL}")
+            return
 
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        if name != _current_session:
-            _sessions[name] = _sessions[_current_session]
-        print(f"{Fore.GREEN}[OK] Session saved: {path}{Style.RESET_ALL}")
-    except Exception as e:
-        print(f"{Fore.RED}[!] Save failed: {e}{Style.RESET_ALL}")
+    # Assign first: _save_session_atomic() reads _sessions[name]
+    if name != _current_session:
+        _sessions[name] = list(_sessions[_current_session])
+    _save_session_atomic(name)  # atomic write for crash safety
+    print(f"{Fore.GREEN}[OK] Session saved: {path}{Style.RESET_ALL}")
 
 def load_session() -> None:
     global _last_assistant_text, _current_session
@@ -1044,9 +1184,9 @@ def load_session() -> None:
     for i, f in enumerate(files, 1):
         print(f"  {i}. {f}")
 
-    choice = input(
+    choice = _ask(
         f"\n{Fore.CYAN}[+] Select session (number or name): {Style.RESET_ALL}"
-    ).strip()
+    )
     if not choice:
         return
     if choice.isdigit():
@@ -1100,8 +1240,11 @@ def load_session() -> None:
     )
 
 def clear_history() -> None:
+    global _last_assistant_text
     _sessions[_current_session] = []
+    _last_assistant_text = ""
     _session_last_text[_current_session] = ""
+    _save_session_atomic(_current_session)  # persist immediately
     print(f"{Fore.GREEN}[OK] Conversation history cleared.{Style.RESET_ALL}")
 
 # ============ HELP ============
@@ -1113,7 +1256,7 @@ PollenChat Commands:
   [config]      — Set temperature / max_tokens
   [stream]      — Toggle streaming / batch display mode
   [image]       — Enter image generation mode
-  [long]        — Enter multiline input mode
+  [long]        — Enter multiline input mode (type [end] to finish)
   [import]      — Import a .md/.txt file and send as user message
   [search]      — Search conversation history
   [render]      — Re-display last response with Markdown formatting
@@ -1147,10 +1290,12 @@ def main() -> None:
 
     cfg = load_config()
     apply_config(cfg)
-    _auto_load_all_sessions()
 
     clear()
     print(Fore.MAGENTA + BANNER + Style.RESET_ALL)
+
+    # Load sessions AFTER clearing screen so broken-JSON warnings are visible
+    _auto_load_all_sessions()
 
     print(f"{Fore.CYAN}[~] Fetching available models from PollinationsAI...{Style.RESET_ALL}")
     fetch_models()
@@ -1158,20 +1303,26 @@ def main() -> None:
 
     if not cfg.get("username"):
         default_name = os.environ.get("USER", os.environ.get("USERNAME", "User"))
-        name_input = input(
+        name_input = _ask(
             f"{Fore.CYAN}[+] Your name (Enter for '{default_name}'): {Style.RESET_ALL}"
-        ).strip()
+        )
         username = name_input if name_input else default_name
         save_config(build_config())
 
     print(f"{Fore.GREEN}[OK] Welcome, {username}! Type [help] for commands.{Style.RESET_ALL}")
-    print(f"{Fore.GREEN}[OK] Current session: '{_current_session}' ({len(_sessions[_current_session])} messages){Style.RESET_ALL}\n")
+    print(
+        f"{Fore.GREEN}[OK] Current session: '{_current_session}' "
+        f"({len(_sessions[_current_session])} messages){Style.RESET_ALL}\n"
+    )
 
     try:
         while True:
             try:
-                prompt_str = f"{Fore.GREEN}{username}{Style.RESET_ALL}{Fore.CYAN}[{_current_session}]{Style.RESET_ALL} : "
-                user_input = input(prompt_str).strip()
+                prompt_str = (
+                    f"{Fore.GREEN}{username}{Style.RESET_ALL}"
+                    f"{Fore.CYAN}[{_current_session}]{Style.RESET_ALL} : "
+                )
+                user_input = _ask(prompt_str)
                 if not user_input:
                     continue
 
