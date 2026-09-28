@@ -1,0 +1,1257 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+PollenChat v2.8.1 — Clean CLI chat client for PollinationsAI
+Fixes in v2.8.1:
+  - Fix missing `global` declarations in load_session() and rename_session()
+  - rename_session() now removes the old session file to avoid orphan files
+  - Clarify that config (model/system/temperature/max_tokens) is session-agnostic
+New features in v2.8:
+  - Multi-session management: [sessions] [switch] [new] [rename] [delete]
+  - Auto-load all sessions on startup, auto-save all on exit
+  - Session name shown in the prompt
+Fixes from v2.7.1:
+  - Add file content preview after [import] load
+  - Exclude bool from max_tokens type check
+  - Harden _safe_filename against illegal chars
+API Docs: https://github.com/pollinations/pollinations/blob/master/APIDOCS.md
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import json
+import re
+import random
+import datetime
+import requests
+from typing import Optional
+from urllib.parse import quote
+
+from colorama import init, Fore, Style
+
+init(autoreset=True)
+
+# ============ CONFIG ============
+API_BASE = "https://text.pollinations.ai/openai"
+IMAGE_BASE = "https://image.pollinations.ai/prompt"
+MODELS_URL = "https://text.pollinations.ai/models"
+
+SESSION_DIR = "sessions"
+IMAGE_DIR = "pollen_images"
+CODE_DIR = "pollen_codes"
+EXPORT_DIR = "pollen_exports"
+CONFIG_FILE = "config.json"
+MAX_HISTORY = 20
+IMPORT_MAX_BYTES = 200_000
+
+# Extension map for code block languages
+LANG_EXT = {
+    "python": ".py", "py": ".py",
+    "javascript": ".js", "js": ".js",
+    "typescript": ".ts", "ts": ".ts",
+    "jsx": ".jsx", "tsx": ".tsx",
+    "html": ".html", "css": ".css", "json": ".json",
+    "bash": ".sh", "sh": ".sh", "shell": ".sh", "zsh": ".zsh",
+    "cpp": ".cpp", "c++": ".cpp", "c": ".c",
+    "go": ".go", "rust": ".rs", "rs": ".rs",
+    "java": ".java", "kotlin": ".kt", "swift": ".swift",
+    "ruby": ".rb", "rb": ".rb", "php": ".php",
+    "sql": ".sql", "yaml": ".yaml", "yml": ".yml",
+    "toml": ".toml", "xml": ".xml",
+    "dockerfile": ".dockerfile", "docker": ".dockerfile",
+    "makefile": ".mk", "cmake": ".cmake",
+    "lua": ".lua", "r": ".r",
+    "perl": ".pl", "pl": ".pl",
+    "haskell": ".hs", "hs": ".hs",
+    "scala": ".scala", "dart": ".dart",
+    "julia": ".jl", "matlab": ".m",
+    "vim": ".vim", "ini": ".ini", "cfg": ".cfg",
+    "csv": ".csv", "markdown": ".md", "md": ".md",
+    "tex": ".tex", "latex": ".tex",
+}
+
+# ============ BANNER ============
+BANNER = r"""
+    ____       __           ________          __
+   / __ \_____/ /_____     / ____/ /_  ____ _/ /_
+  / /_/ / ___/ //_/ _ \   / /   / __ \/ __ `/ __/
+ / ____/ /__/ ,< /  __/  / /___/ / / / /_/ / /_
+/_/    \___/_/|_|\___/   \____/_/ /_/\__,_/\__/
+                                         v2.8.1
+         Clean & Harmless — Powered by PollinationsAI
+"""
+
+# ============ STATE ============
+_sessions: dict[str, list[dict[str, str]]] = {"default": []}
+_current_session: str = "default"
+_session_last_text: dict[str, str] = {}
+
+current_model: str = "openai"
+_system_prompt: str = "You are a helpful assistant."
+_temperature: float = 0.7
+_max_tokens: Optional[int] = None
+_stream_mode: bool = True
+_last_assistant_text: str = ""
+
+# Image mode defaults (not persisted in config)
+_img_width: int = 1024
+_img_height: int = 1024
+_img_seed: Optional[int] = None
+
+available_models: list[str] = []
+username: str = "User"
+
+# ============ UTILS ============
+def clear() -> None:
+    os.system("clear" if os.name == "posix" else "cls")
+
+def ensure_dirs() -> None:
+    os.makedirs(SESSION_DIR, exist_ok=True)
+    os.makedirs(IMAGE_DIR, exist_ok=True)
+    os.makedirs(CODE_DIR, exist_ok=True)
+    os.makedirs(EXPORT_DIR, exist_ok=True)
+
+def _safe_session_name(name: str) -> str:
+    name = os.path.basename(name.strip())
+    if not name:
+        name = "session"
+    return name if name.endswith(".json") else name + ".json"
+
+def _safe_filename(name: str) -> str:
+    name = os.path.basename(name.strip())
+    name = re.sub(r'[\\/:*?"<>|]', "_", name)
+    return name or "snippet"
+
+def _sanitize_session_name(name: str) -> str:
+    name = name.strip()
+    name = re.sub(r'[\\/:*?"<>|]', "_", name)
+    return name or "untitled"
+
+# ============ CONFIG ============
+def load_config() -> dict:
+    if not os.path.exists(CONFIG_FILE):
+        return {}
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+def save_config(cfg: dict) -> None:
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+    except OSError as e:
+        print(f"{Fore.RED}[!] Config save failed: {e}{Style.RESET_ALL}")
+
+def apply_config(cfg: dict) -> None:
+    global current_model, _system_prompt, username, _stream_mode, _temperature, _max_tokens
+    if "model" in cfg and isinstance(cfg["model"], str):
+        current_model = cfg["model"]
+    if "system_prompt" in cfg and isinstance(cfg["system_prompt"], str):
+        _system_prompt = cfg["system_prompt"]
+    if "username" in cfg and isinstance(cfg["username"], str):
+        username = cfg["username"]
+    if "stream_mode" in cfg and isinstance(cfg["stream_mode"], bool):
+        _stream_mode = cfg["stream_mode"]
+    if "temperature" in cfg and isinstance(cfg["temperature"], (int, float)):
+        _temperature = float(cfg["temperature"])
+    if "max_tokens" in cfg:
+        if cfg["max_tokens"] is None:
+            _max_tokens = None
+        elif isinstance(cfg["max_tokens"], int) and not isinstance(cfg["max_tokens"], bool):
+            _max_tokens = cfg["max_tokens"]
+
+def build_config() -> dict:
+    return {
+        "model": current_model,
+        "system_prompt": _system_prompt,
+        "username": username,
+        "stream_mode": _stream_mode,
+        "temperature": _temperature,
+        "max_tokens": _max_tokens,
+    }
+
+# ============ MARKDOWN RENDERER ============
+def render_markdown(text: str) -> str:
+    result = []
+    in_code_block = False
+
+    for raw_line in text.splitlines(keepends=True):
+        line = raw_line.rstrip("\n\r")
+
+        if line.strip().startswith("```"):
+            in_code_block = not in_code_block
+            if in_code_block:
+                lang = line.strip()[3:].strip()
+                result.append(f"{Fore.CYAN}▶ {lang if lang else 'code'}{Style.RESET_ALL}\n")
+            else:
+                result.append(f"{Fore.CYAN}◀{Style.RESET_ALL}\n")
+            continue
+
+        if in_code_block:
+            result.append(f"{Fore.LIGHTBLACK_EX}{line}{Style.RESET_ALL}\n")
+            continue
+
+        header_match = re.match(r"^(#{1,6})\s+(.*)$", line)
+        if header_match:
+            level = len(header_match.group(1))
+            colors = [Fore.RED, Fore.YELLOW, Fore.GREEN, Fore.CYAN, Fore.MAGENTA, Fore.WHITE]
+            color = colors[level - 1] if level <= len(colors) else Fore.WHITE
+            result.append(f"{color}{Style.BRIGHT}{line}{Style.RESET_ALL}\n")
+            continue
+
+        formatted = line
+        formatted = re.sub(
+            r"\*\*(.+?)\*\*",
+            lambda m: f"{Style.BRIGHT}{Fore.WHITE}{m.group(1)}{Style.RESET_ALL}",
+            formatted,
+        )
+        formatted = re.sub(
+            r"`([^`]+)`",
+            lambda m: f"{Fore.LIGHTBLACK_EX}{m.group(1)}{Style.RESET_ALL}",
+            formatted,
+        )
+        result.append(f"{formatted}\n")
+
+    return "".join(result).rstrip("\n")
+
+# ============ MODELS ============
+def _extract_model_name(item: str | dict) -> Optional[str]:
+    if isinstance(item, str):
+        return item
+    if isinstance(item, dict):
+        for key in ("name", "id", "model"):
+            val = item.get(key)
+            if isinstance(val, str):
+                return val
+    return None
+
+def fetch_models() -> None:
+    global available_models
+    try:
+        r = requests.get(MODELS_URL, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            if isinstance(data, list):
+                names = [_extract_model_name(m) for m in data]
+                available_models = [n for n in names if n is not None]
+            else:
+                available_models = []
+        else:
+            available_models = []
+    except Exception as e:
+        print(f"{Fore.YELLOW}[!] Could not fetch models ({e}); using defaults.{Style.RESET_ALL}")
+        available_models = []
+
+    if not available_models:
+        available_models = [
+            "openai", "mistral", "llama", "claude",
+            "gemini", "deepseek", "qwen",
+        ]
+
+def select_model() -> None:
+    global current_model
+    print(f"\n{Fore.YELLOW}Available models:{Style.RESET_ALL}")
+    for i, m in enumerate(available_models, 1):
+        marker = f"{Fore.GREEN}*{Style.RESET_ALL}" if m == current_model else " "
+        print(f"  [{marker}] {i}. {m}")
+
+    choice = input(
+        f"\n{Fore.CYAN}[+] Select model (number or name, Enter to keep {current_model}): {Style.RESET_ALL}"
+    ).strip()
+    if not choice:
+        return
+
+    if choice.isdigit():
+        idx = int(choice) - 1
+        if 0 <= idx < len(available_models):
+            current_model = available_models[idx]
+        else:
+            print(f"{Fore.RED}[!] Invalid number.{Style.RESET_ALL}")
+            return
+    else:
+        current_model = choice
+
+    print(f"{Fore.GREEN}[OK] Model set to: {current_model}{Style.RESET_ALL}")
+    save_config(build_config())
+
+# ============ SYSTEM PROMPT ============
+def set_system_prompt() -> None:
+    global _system_prompt
+    print(f"\n{Fore.YELLOW}Current system prompt:{Style.RESET_ALL}")
+    print(f"  {_system_prompt}\n")
+    print(f"{Fore.CYAN}Enter new prompt (empty line = keep, [reset] = default):{Style.RESET_ALL}")
+    lines = []
+    while True:
+        try:
+            line = input()
+        except EOFError:
+            break
+        if line.strip() == "[reset]":
+            _system_prompt = "You are a helpful assistant."
+            print(f"{Fore.GREEN}[OK] System prompt reset to default.{Style.RESET_ALL}")
+            save_config(build_config())
+            return
+        if line == "":
+            break
+        lines.append(line)
+    if lines:
+        _system_prompt = "\n".join(lines)
+        print(f"{Fore.GREEN}[OK] System prompt updated.{Style.RESET_ALL}")
+        save_config(build_config())
+    else:
+        print(f"{Fore.YELLOW}[~] Kept current prompt.{Style.RESET_ALL}")
+
+# ============ CONFIG (temperature / max_tokens) ============
+def _prompt_float(current: float, prompt_text: str, min_val: float, max_val: float) -> Optional[float]:
+    while True:
+        raw = input(prompt_text).strip()
+        if raw == "":
+            return None
+        try:
+            val = float(raw)
+        except ValueError:
+            print(f"{Fore.RED}[!] Please enter a number.{Style.RESET_ALL}")
+            continue
+        if not (min_val <= val <= max_val):
+            print(f"{Fore.RED}[!] Value must be between {min_val} and {max_val}.{Style.RESET_ALL}")
+            continue
+        return val
+
+def _prompt_optional_int(prompt_text: str) -> Optional[int]:
+    while True:
+        raw = input(prompt_text).strip().lower()
+        if raw == "":
+            return None
+        if raw == "none":
+            return -1
+        try:
+            val = int(raw)
+        except ValueError:
+            print(f"{Fore.RED}[!] Please enter a positive integer or 'none'.{Style.RESET_ALL}")
+            continue
+        if val < 1:
+            print(f"{Fore.RED}[!] Must be at least 1.{Style.RESET_ALL}")
+            continue
+        return val
+
+def edit_config() -> None:
+    global _temperature, _max_tokens
+    print(f"\n{Fore.YELLOW}Current configuration:{Style.RESET_ALL}")
+    print(f"  temperature : {_temperature}")
+    mt = str(_max_tokens) if _max_tokens else "(unset / server default)"
+    print(f"  max_tokens  : {mt}\n")
+
+    new_temp = _prompt_float(
+        _temperature,
+        f"{Fore.CYAN}[+] temperature (current: {_temperature}, Enter=keep, 0.0-2.0): {Style.RESET_ALL}",
+        0.0, 2.0,
+    )
+    if new_temp is not None:
+        _temperature = round(new_temp, 2)
+        print(f"{Fore.GREEN}[OK] temperature set to {_temperature}{Style.RESET_ALL}")
+
+    new_mt = _prompt_optional_int(
+        f"{Fore.CYAN}[+] max_tokens (current: {mt}, Enter=keep, 'none'=unset): {Style.RESET_ALL}"
+    )
+    if new_mt == -1:
+        _max_tokens = None
+        print(f"{Fore.GREEN}[!] max_tokens unset (server default){Style.RESET_ALL}")
+    elif new_mt is not None:
+        _max_tokens = new_mt
+        print(f"{Fore.GREEN}[OK] max_tokens set to {_max_tokens}{Style.RESET_ALL}")
+
+    save_config(build_config())
+
+# ============ STREAM TOGGLE ============
+def toggle_stream() -> None:
+    global _stream_mode
+    _stream_mode = not _stream_mode
+    status = "ON (streaming)" if _stream_mode else "OFF (batch)"
+    print(f"{Fore.GREEN}[OK] Streaming mode: {status}{Style.RESET_ALL}")
+    save_config(build_config())
+
+# ============ SESSION MANAGEMENT (multi-session) ============
+def _valid_history(history: object) -> bool:
+    if not isinstance(history, list):
+        return False
+    for msg in history:
+        if not isinstance(msg, dict):
+            return False
+        if msg.get("role") not in ("user", "assistant"):
+            return False
+        if not isinstance(msg.get("content"), str):
+            return False
+    return True
+
+def _auto_load_all_sessions() -> None:
+    global _sessions, _current_session
+    files = sorted(f for f in os.listdir(SESSION_DIR) if f.endswith(".json"))
+    loaded_any = False
+    for fname in files:
+        path = os.path.join(SESSION_DIR, fname)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            history = data.get("history", []) if isinstance(data, dict) else []
+            if _valid_history(history):
+                name = fname[:-5]
+                _sessions[name] = history
+                loaded_any = True
+        except Exception:
+            continue
+    if not loaded_any:
+        _sessions = {"default": []}
+        _current_session = "default"
+    else:
+        if "default" in _sessions:
+            _current_session = "default"
+        else:
+            _current_session = sorted(_sessions.keys())[0]
+
+def _auto_save_all_sessions() -> None:
+    # Note: model/system_prompt/temperature/max_tokens are session-agnostic.
+    # They are saved with each session file for convenience, but changing them
+    # in one session affects all sessions (they are global settings).
+    for name, history in _sessions.items():
+        fname = _safe_session_name(name)
+        path = os.path.join(SESSION_DIR, fname)
+        data = {
+            "model": current_model,
+            "username": username,
+            "system_prompt": _system_prompt,
+            "temperature": _temperature,
+            "max_tokens": _max_tokens,
+            "history": history,
+            "saved_at": datetime.datetime.now().isoformat(),
+        }
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except OSError as e:
+            print(f"{Fore.RED}[!] Failed to save '{name}': {e}{Style.RESET_ALL}")
+
+def list_sessions() -> None:
+    print(f"\n{Fore.YELLOW}Sessions:{Style.RESET_ALL}")
+    for i, name in enumerate(sorted(_sessions.keys()), 1):
+        marker = f"{Fore.GREEN}*{Style.RESET_ALL}" if name == _current_session else " "
+        count = len(_sessions[name])
+        print(f"  [{marker}] {i}. {name} ({count} messages)")
+    print()
+
+def switch_session() -> None:
+    global _current_session, _last_assistant_text
+    list_sessions()
+    choice = input(f"{Fore.CYAN}[+] Switch to (number or name): {Style.RESET_ALL}").strip()
+    if not choice:
+        return
+    names = sorted(_sessions.keys())
+    if choice.isdigit():
+        idx = int(choice) - 1
+        if 0 <= idx < len(names):
+            name = names[idx]
+        else:
+            print(f"{Fore.RED}[!] Invalid number.{Style.RESET_ALL}")
+            return
+    else:
+        if choice not in _sessions:
+            print(f"{Fore.RED}[!] Session '{choice}' not found. Use [new] to create.{Style.RESET_ALL}")
+            return
+        name = choice
+
+    _current_session = name
+    _last_assistant_text = _session_last_text.get(name, "")
+    print(f"{Fore.GREEN}[OK] Switched to '{_current_session}' ({len(_sessions[_current_session])} messages){Style.RESET_ALL}")
+
+def new_session() -> None:
+    global _current_session, _last_assistant_text
+    name = input(f"{Fore.CYAN}[+] New session name: {Style.RESET_ALL}").strip()
+    if not name:
+        print(f"{Fore.RED}[!] Name cannot be empty.{Style.RESET_ALL}")
+        return
+    name = _sanitize_session_name(name)
+    if name in _sessions:
+        print(f"{Fore.YELLOW}[!] Session '{name}' already exists. Switched to it.{Style.RESET_ALL}")
+        _current_session = name
+        _last_assistant_text = _session_last_text.get(name, "")
+        return
+    _sessions[name] = []
+    _current_session = name
+    _last_assistant_text = ""
+    print(f"{Fore.GREEN}[OK] Created and switched to '{name}'{Style.RESET_ALL}")
+
+def rename_session() -> None:
+    global _current_session
+    old = _current_session
+    new = input(f"{Fore.CYAN}[+] Rename '{old}' to: {Style.RESET_ALL}").strip()
+    if not new:
+        return
+    new = _sanitize_session_name(new)
+    if new in _sessions and new != old:
+        print(f"{Fore.RED}[!] Name '{new}' already exists.{Style.RESET_ALL}")
+        return
+    _sessions[new] = _sessions.pop(old)
+    _session_last_text[new] = _session_last_text.pop(old, "")
+    _current_session = new
+
+    # Remove old session file to avoid orphan files
+    old_path = os.path.join(SESSION_DIR, _safe_session_name(old))
+    try:
+        if os.path.exists(old_path):
+            os.remove(old_path)
+    except OSError as e:
+        print(f"{Fore.YELLOW}[!] Could not remove old file: {e}{Style.RESET_ALL}")
+
+    print(f"{Fore.GREEN}[OK] Renamed '{old}' → '{new}'{Style.RESET_ALL}")
+
+def delete_session() -> None:
+    global _current_session
+    name = input(f"{Fore.CYAN}[+] Delete session (name, Enter=cancel): {Style.RESET_ALL}").strip()
+    if not name or name not in _sessions:
+        print(f"{Fore.YELLOW}[~] Cancelled or not found.{Style.RESET_ALL}")
+        return
+    if name == _current_session:
+        print(f"{Fore.RED}[!] Cannot delete the current session.{Style.RESET_ALL}")
+        return
+    confirm = input(f"{Fore.RED}[!] Really delete '{name}'? type 'yes': {Style.RESET_ALL}").strip()
+    if confirm != "yes":
+        print(f"{Fore.YELLOW}[~] Cancelled.{Style.RESET_ALL}")
+        return
+    del _sessions[name]
+    _session_last_text.pop(name, None)
+    # Also delete the file
+    fname = _safe_session_name(name)
+    path = os.path.join(SESSION_DIR, fname)
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except OSError as e:
+        print(f"{Fore.YELLOW}[!] Could not remove file: {e}{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}[OK] Deleted '{name}'{Style.RESET_ALL}")
+
+# ============ CHAT ============
+def send_chat(
+    messages: list[dict[str, str]], stream: bool = True
+) -> Optional[requests.Response]:
+    payload: dict[str, object] = {
+        "model": current_model,
+        "messages": messages,
+        "stream": stream,
+        "temperature": _temperature,
+    }
+    if _max_tokens is not None:
+        payload["max_tokens"] = _max_tokens
+
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "PollenChat/2.8.1",
+    }
+
+    try:
+        response = requests.post(
+            API_BASE, headers=headers, json=payload, stream=stream, timeout=60
+        )
+        response.raise_for_status()
+        return response
+    except requests.exceptions.HTTPError as e:
+        if e.response is not None and e.response.status_code == 429:
+            print(
+                f"{Fore.RED}[!] Rate limited (429). "
+                f"PollinationsAI free tier has limits. Wait a moment and retry.{Style.RESET_ALL}"
+            )
+        else:
+            print(f"{Fore.RED}[!] HTTP Error: {e}{Style.RESET_ALL}")
+        return None
+    except Exception as e:
+        print(f"{Fore.RED}[!] Request failed: {e}{Style.RESET_ALL}")
+        return None
+
+def stream_response(response: requests.Response) -> tuple[str, bool]:
+    full_text = ""
+    completed = False
+
+    try:
+        for line in response.iter_lines(decode_unicode=False):
+            if not line:
+                continue
+            text_line = line.decode("utf-8", errors="replace").strip()
+            if not text_line.startswith("data:"):
+                continue
+            data_str = text_line[5:].strip()
+            if data_str == "[DONE]":
+                break
+            try:
+                data = json.loads(data_str)
+            except json.JSONDecodeError:
+                continue
+            choices = data.get("choices") or []
+            if choices:
+                content = (choices[0].get("delta") or {}).get("content") or ""
+                if content:
+                    sys.stdout.write(Fore.MAGENTA + content + Style.RESET_ALL)
+                    sys.stdout.flush()
+                    full_text += content
+        completed = True
+        print()
+    except KeyboardInterrupt:
+        print(f"\n{Fore.YELLOW}[!] Interrupted by user.{Style.RESET_ALL}")
+    except requests.exceptions.RequestException as e:
+        print(f"\n{Fore.RED}[!] Stream error: {e}{Style.RESET_ALL}")
+    return full_text, completed
+
+def batch_response(response: requests.Response) -> tuple[str, bool]:
+    try:
+        data = response.json()
+        choices = data.get("choices") or []
+        if choices:
+            content = choices[0].get("message", {}).get("content", "")
+            if content:
+                print(Fore.MAGENTA + content + Style.RESET_ALL)
+                return content, True
+        return "", True
+    except (json.JSONDecodeError, KeyError, requests.exceptions.RequestException) as e:
+        print(f"{Fore.RED}[!] Batch response error: {e}{Style.RESET_ALL}")
+        return "", False
+
+def _trim_history(messages: list[dict[str, str]]) -> list[dict[str, str]]:
+    system_msgs = [m for m in messages if m.get("role") == "system"]
+    rest = [m for m in messages if m.get("role") != "system"]
+
+    trimmed = rest[-MAX_HISTORY:] if len(rest) > MAX_HISTORY else rest[:]
+    while trimmed and trimmed[0].get("role") != "user":
+        trimmed = trimmed[1:]
+
+    return system_msgs + trimmed
+
+def _build_messages_for_api(user_input: str) -> list[dict[str, str]]:
+    msgs: list[dict[str, str]] = []
+    if _system_prompt:
+        msgs.append({"role": "system", "content": _system_prompt})
+    msgs.extend(_sessions[_current_session])
+    msgs.append({"role": "user", "content": user_input})
+    return _trim_history(msgs)
+
+def chat_once(user_input: str) -> bool:
+    global _last_assistant_text
+
+    api_messages = _build_messages_for_api(user_input)
+    response = send_chat(api_messages, stream=_stream_mode)
+    if not response:
+        return False
+
+    _sessions[_current_session].append({"role": "user", "content": user_input})
+
+    print(f"\n{Fore.YELLOW}PollenChat ({current_model}):{Style.RESET_ALL} ", end="", flush=True)
+
+    if _stream_mode:
+        assistant_text, completed = stream_response(response)
+    else:
+        assistant_text, completed = batch_response(response)
+
+    if not completed or not assistant_text:
+        _sessions[_current_session].pop()
+        print(f"{Fore.YELLOW}[~] この応答は履歴に追加しませんでした。{Style.RESET_ALL}")
+        _last_assistant_text = ""
+        _session_last_text[_current_session] = ""
+        return False
+
+    _sessions[_current_session].append({"role": "assistant", "content": assistant_text})
+    _last_assistant_text = assistant_text
+    _session_last_text[_current_session] = assistant_text
+    return True
+
+# ============ RENDER LAST RESPONSE ============
+def render_last() -> None:
+    if not _last_assistant_text:
+        print(f"{Fore.YELLOW}[~] No assistant response to render yet.{Style.RESET_ALL}")
+        return
+    print(f"\n{Fore.YELLOW}--- Rendered (Markdown) ---{Style.RESET_ALL}\n")
+    print(render_markdown(_last_assistant_text))
+    print(f"\n{Fore.YELLOW}---------------------------{Style.RESET_ALL}\n")
+
+# ============ SAVE CODE ============
+def _extract_code_blocks(text: str) -> list[tuple[str, str]]:
+    pattern = r"```([\w+\-#]*)\n(.*?)\n```"
+    return re.findall(pattern, text, re.DOTALL)
+
+def _guess_extension(lang: str) -> str:
+    return LANG_EXT.get(lang.lower(), ".txt")
+
+def save_code() -> None:
+    if not _last_assistant_text:
+        print(f"{Fore.YELLOW}[~] No assistant response to extract code from.{Style.RESET_ALL}")
+        return
+
+    blocks = _extract_code_blocks(_last_assistant_text)
+    if not blocks:
+        print(f"{Fore.YELLOW}[~] No code blocks (```...```) found in last response.{Style.RESET_ALL}")
+        return
+
+    print(f"\n{Fore.YELLOW}Code blocks found: {len(blocks)}{Style.RESET_ALL}")
+    for i, (lang, code_text) in enumerate(blocks, 1):
+        lang_display = lang if lang else "(no language)"
+        line_count = code_text.count("\n") + 1
+        preview = code_text[:80].replace("\n", " ")
+        suffix = "..." if len(code_text) > 80 else ""
+        print(f"  {i}. [{lang_display}] {line_count} lines — {preview}{suffix}")
+
+    choice = input(
+        f"\n{Fore.CYAN}[+] Select block number (Enter = 1, [all] = save each): {Style.RESET_ALL}"
+    ).strip()
+
+    if choice.lower() == "all":
+        saved = []
+        for idx, (lang, code_text) in enumerate(blocks, 1):
+            ext = _guess_extension(lang)
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            fname = os.path.join(CODE_DIR, f"snippet_{ts}_{idx}{ext}")
+            with open(fname, "w", encoding="utf-8") as f:
+                f.write(code_text)
+            saved.append(fname)
+        print(f"{Fore.GREEN}[OK] Saved {len(saved)} file(s) to {CODE_DIR}/{Style.RESET_ALL}")
+        for s in saved:
+            print(f"  - {os.path.basename(s)}")
+        return
+
+    if not choice:
+        choice = "1"
+    if not choice.isdigit():
+        print(f"{Fore.RED}[!] Invalid selection.{Style.RESET_ALL}")
+        return
+
+    idx = int(choice) - 1
+    if not (0 <= idx < len(blocks)):
+        print(f"{Fore.RED}[!] Invalid selection.{Style.RESET_ALL}")
+        return
+
+    lang, code_text = blocks[idx]
+    ext = _guess_extension(lang)
+    default_name = f"snippet{ext}"
+    raw_name = input(
+        f"{Fore.CYAN}[+] Filename (Enter for '{default_name}'): {Style.RESET_ALL}"
+    ).strip()
+    fname = _safe_filename(raw_name) if raw_name else default_name
+    if not os.path.splitext(fname)[1]:
+        fname += ext
+
+    path = os.path.join(CODE_DIR, fname)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(code_text)
+        print(f"{Fore.GREEN}[OK] Code saved: {path}{Style.RESET_ALL}")
+    except OSError as e:
+        print(f"{Fore.RED}[!] Save failed: {e}{Style.RESET_ALL}")
+
+# ============ EXPORT ============
+def export_session() -> None:
+    if not _sessions[_current_session]:
+        print(f"{Fore.YELLOW}[~] No conversation to export.{Style.RESET_ALL}")
+        return
+
+    raw = input(f"{Fore.CYAN}[+] Export filename (Enter for auto): {Style.RESET_ALL}").strip()
+    if raw:
+        fname = _safe_filename(raw)
+        if not fname.endswith(".md"):
+            fname += ".md"
+    else:
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        fname = f"export_{ts}.md"
+
+    include_system = False
+    if _system_prompt:
+        sp_choice = input(
+            f"{Fore.CYAN}[+] Include system prompt in export? y/N: {Style.RESET_ALL}"
+        ).strip().lower()
+        include_system = sp_choice == "y"
+
+    lines = []
+    lines.append("# PollenChat Session Export\n")
+    lines.append(f"- **Model:** {current_model}\n")
+    lines.append(f"- **Date:** {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}\n")
+    if include_system:
+        lines.append(f"- **System Prompt:** {_system_prompt}\n")
+    lines.append("\n---\n")
+
+    for msg in _sessions[_current_session]:
+        role = "User" if msg["role"] == "user" else "Assistant"
+        lines.append(f"\n## {role}\n\n{msg['content']}\n")
+
+    lines.append("\n---\n\n*Exported by PollenChat*\n")
+
+    path = os.path.join(EXPORT_DIR, fname)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("".join(lines))
+        print(f"{Fore.GREEN}[OK] Exported to: {path}{Style.RESET_ALL}")
+    except OSError as e:
+        print(f"{Fore.RED}[!] Export failed: {e}{Style.RESET_ALL}")
+
+# ============ IMPORT ============
+def import_file() -> None:
+    global _last_assistant_text
+    path = input(f"{Fore.CYAN}[+] File path: {Style.RESET_ALL}").strip()
+    if not path or not os.path.isfile(path):
+        print(f"{Fore.RED}[!] File not found.{Style.RESET_ALL}")
+        return
+
+    ext = os.path.splitext(path)[1].lower()
+    if ext not in (".md", ".txt"):
+        print(f"{Fore.YELLOW}[!] Only .md and .txt files are supported.{Style.RESET_ALL}")
+        return
+
+    size = os.path.getsize(path)
+    if size > IMPORT_MAX_BYTES:
+        confirm = input(
+            f"{Fore.YELLOW}[!] {size:,} bytes. Continue? y/N: {Style.RESET_ALL}"
+        ).strip().lower()
+        if confirm != "y":
+            return
+
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+    except OSError as e:
+        print(f"{Fore.RED}[!] Read failed: {e}{Style.RESET_ALL}")
+        return
+
+    print(f"{Fore.GREEN}[OK] Loaded {len(content):,} characters.{Style.RESET_ALL}")
+    preview = content[:200].replace("\n", " ")
+    suffix = "..." if len(content) > 200 else ""
+    print(f"{Fore.CYAN}[Preview]:{Style.RESET_ALL} {preview}{suffix}\n")
+
+    extra = input(
+        f"{Fore.CYAN}[+] Question about this file (Enter to send file content only): {Style.RESET_ALL}"
+    ).strip()
+
+    full_input = f"{content}\n\n{extra}" if extra else content
+    chat_once(full_input)
+
+# ============ UNDO ============
+def undo_last() -> None:
+    global _last_assistant_text
+    history = _sessions[_current_session]
+    if len(history) < 2:
+        print(f"{Fore.YELLOW}[~] No exchange to undo.{Style.RESET_ALL}")
+        return
+
+    removed = []
+    if history[-1]["role"] == "assistant":
+        removed.append(history.pop())
+    if history and history[-1]["role"] == "user":
+        removed.append(history.pop())
+
+    _last_assistant_text = ""
+    _session_last_text[_current_session] = ""
+    print(
+        f"{Fore.GREEN}[OK] Undid last exchange ({len(removed)} message(s)). "
+        f"History now: {len(history)} messages.{Style.RESET_ALL}"
+    )
+
+# ============ TOKEN ESTIMATE ============
+def estimate_tokens() -> None:
+    all_text = _system_prompt + "".join(m["content"] for m in _sessions[_current_session])
+    total_chars = len(all_text)
+    ascii_chars = sum(1 for c in all_text if ord(c) < 128)
+    non_ascii_chars = total_chars - ascii_chars
+    est = ascii_chars / 4 + non_ascii_chars / 1.5
+
+    print(f"\n{Fore.YELLOW}Token estimate ({_current_session}):{Style.RESET_ALL}")
+    print(f"  Approximate tokens : {int(est):,}")
+    print(f"  Total characters   : {total_chars:,}")
+    print(f"  ASCII chars        : {ascii_chars:,}")
+    print(f"  Non-ASCII chars    : {non_ascii_chars:,}")
+    print(f"{Fore.YELLOW}  ※ This is a rough estimate. Actual tokenizer counts may differ.{Style.RESET_ALL}\n")
+
+# ============ IMAGE GENERATION ============
+def _ext_from_content_type(content_type: str) -> str:
+    ct = content_type.lower()
+    if "jpeg" in ct or "jpg" in ct:
+        return ".jpg"
+    if "webp" in ct:
+        return ".webp"
+    return ".png"
+
+def generate_image(
+    prompt: str,
+    width: Optional[int] = None,
+    height: Optional[int] = None,
+    seed: Optional[int] = None,
+    nologo: bool = True,
+) -> Optional[str]:
+    w = width if width is not None else _img_width
+    h = height if height is not None else _img_height
+    s = seed if seed is not None else (_img_seed if _img_seed is not None else random.randint(1, 999999))
+
+    encoded_prompt = quote(prompt)
+    url = (
+        f"{IMAGE_BASE}/{encoded_prompt}"
+        f"?width={w}&height={h}&seed={s}"
+        f"&nologo={str(nologo).lower()}"
+    )
+
+    print(
+        f"{Fore.CYAN}[~] Generating image... "
+        f"prompt: {prompt[:50]}... | size: {w}x{h} | seed: {s}{Style.RESET_ALL}"
+    )
+
+    try:
+        r = requests.get(url, timeout=60)
+        if r.status_code != 200:
+            print(f"{Fore.RED}[!] Failed to generate image: HTTP {r.status_code}{Style.RESET_ALL}")
+            return None
+
+        content_type = r.headers.get("Content-Type", "")
+        if not content_type.startswith("image/"):
+            print(
+                f"{Fore.RED}[!] Unexpected Content-Type: {content_type} "
+                f"(expected image/*){Style.RESET_ALL}"
+            )
+            return None
+
+        ext = _ext_from_content_type(content_type)
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_prompt = "".join(c if c.isalnum() else "_" for c in prompt[:30])
+        filename = os.path.join(IMAGE_DIR, f"img_{ts}_{safe_prompt}{ext}")
+        with open(filename, "wb") as f:
+            f.write(r.content)
+        print(f"{Fore.GREEN}[OK] Image saved: {filename}{Style.RESET_ALL}")
+        return filename
+    except Exception as e:
+        print(f"{Fore.RED}[!] Image generation error: {e}{Style.RESET_ALL}")
+        return None
+
+def image_mode() -> None:
+    global _img_width, _img_height, _img_seed
+
+    print(f"\n{Fore.YELLOW}Image Generation Mode{Style.RESET_ALL}")
+    print(f"  Current: {_img_width}x{_img_height}, seed={_img_seed if _img_seed else 'random'}\n")
+    print("  Type your prompt, 'exit' to leave, or:")
+    print("  [size] — change width/height")
+    print("  [seed] — set/clear a fixed seed\n")
+
+    while True:
+        prompt = input(f"{Fore.CYAN}[image] {username}: {Style.RESET_ALL}").strip()
+        if not prompt:
+            continue
+
+        cmd = prompt.lower()
+        if cmd in ("exit", "quit", "back"):
+            print(f"{Fore.YELLOW}[~] Returning to chat mode.{Style.RESET_ALL}\n")
+            break
+        elif cmd in ("[size]", "size"):
+            w_input = input(f"{Fore.CYAN}[+] width (current: {_img_width}): {Style.RESET_ALL}").strip()
+            h_input = input(f"{Fore.CYAN}[+] height (current: {_img_height}): {Style.RESET_ALL}").strip()
+            if w_input.isdigit():
+                _img_width = int(w_input)
+            if h_input.isdigit():
+                _img_height = int(h_input)
+            print(f"{Fore.GREEN}[OK] Size set to {_img_width}x{_img_height}{Style.RESET_ALL}")
+            continue
+        elif cmd in ("[seed]", "seed"):
+            s_input = input(
+                f"{Fore.CYAN}[+] seed (current: {_img_seed if _img_seed else 'random'}, 'none'=random): {Style.RESET_ALL}"
+            ).strip()
+            if s_input.lower() == "none":
+                _img_seed = None
+                print(f"{Fore.GREEN}[OK] Seed set to random{Style.RESET_ALL}")
+            elif s_input.isdigit():
+                _img_seed = int(s_input)
+                print(f"{Fore.GREEN}[OK] Seed fixed to {_img_seed}{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.YELLOW}[~] Kept current seed.{Style.RESET_ALL}")
+            continue
+
+        generate_image(prompt)
+
+# ============ MULTILINE INPUT ============
+def read_multiline() -> str:
+    print(f"{Fore.CYAN}[+] Multiline mode. Enter text, then a blank line to finish:{Style.RESET_ALL}")
+    lines = []
+    while True:
+        try:
+            line = input()
+        except EOFError:
+            break
+        if line == "":
+            break
+        lines.append(line)
+    return "\n".join(lines)
+
+# ============ SEARCH ============
+def search_history() -> None:
+    query = input(f"{Fore.CYAN}[+] Search keyword: {Style.RESET_ALL}").strip().lower()
+    if not query:
+        print(f"{Fore.YELLOW}[~] Empty query.{Style.RESET_ALL}")
+        return
+
+    matches = []
+    for i, msg in enumerate(_sessions[_current_session]):
+        if query in msg["content"].lower():
+            role_label = username if msg["role"] == "user" else "AI"
+            snippet = msg["content"][:120]
+            suffix = "..." if len(msg["content"]) > 120 else ""
+            matches.append((i, role_label, snippet + suffix))
+
+    if not matches:
+        print(f"{Fore.YELLOW}[~] No matches found.{Style.RESET_ALL}")
+        return
+
+    print(f"\n{Fore.GREEN}{len(matches)} match(es):{Style.RESET_ALL}")
+    for idx, role_label, snippet in matches:
+        color = Fore.GREEN if role_label == username else Fore.MAGENTA
+        print(f"  {color}[{idx}]{role_label}:{Style.RESET_ALL} {snippet}")
+    print()
+
+# ============ LEGACY SESSION SAVE/LOAD ============
+def save_session() -> None:
+    raw = input(f"{Fore.CYAN}[+] Save current session as (Enter='{_current_session}'): {Style.RESET_ALL}").strip()
+    name = raw or _current_session
+    fname = _safe_session_name(name)
+    path = os.path.join(SESSION_DIR, fname)
+
+    data = {
+        "model": current_model,
+        "username": username,
+        "system_prompt": _system_prompt,
+        "temperature": _temperature,
+        "max_tokens": _max_tokens,
+        "history": _sessions[_current_session],
+        "saved_at": datetime.datetime.now().isoformat(),
+    }
+
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        if name != _current_session:
+            _sessions[name] = _sessions[_current_session]
+        print(f"{Fore.GREEN}[OK] Session saved: {path}{Style.RESET_ALL}")
+    except Exception as e:
+        print(f"{Fore.RED}[!] Save failed: {e}{Style.RESET_ALL}")
+
+def load_session() -> None:
+    global _last_assistant_text, _current_session
+    global current_model, username, _system_prompt, _temperature, _max_tokens
+
+    files = sorted(f for f in os.listdir(SESSION_DIR) if f.endswith(".json"))
+    if not files:
+        print(f"{Fore.YELLOW}[!] No saved sessions found.{Style.RESET_ALL}")
+        return
+
+    print(f"\n{Fore.YELLOW}Saved sessions:{Style.RESET_ALL}")
+    for i, f in enumerate(files, 1):
+        print(f"  {i}. {f}")
+
+    choice = input(
+        f"\n{Fore.CYAN}[+] Select session (number or name): {Style.RESET_ALL}"
+    ).strip()
+    if not choice:
+        return
+    if choice.isdigit():
+        idx = int(choice) - 1
+        if not (0 <= idx < len(files)):
+            print(f"{Fore.RED}[!] Invalid number.{Style.RESET_ALL}")
+            return
+        fname = files[idx]
+    else:
+        fname = _safe_session_name(choice)
+
+    path = os.path.join(SESSION_DIR, fname)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f"{Fore.RED}[!] Load failed: {e}{Style.RESET_ALL}")
+        return
+
+    history = data.get("history", []) if isinstance(data, dict) else None
+    if not _valid_history(history):
+        print(f"{Fore.RED}[!] Load failed: invalid session format.{Style.RESET_ALL}")
+        return
+
+    name = fname[:-5]
+    _sessions[name] = history
+    _current_session = name
+    _last_assistant_text = _session_last_text.get(name, "")
+
+    model = data.get("model")
+    if isinstance(model, str) and model:
+        current_model = model
+    name_field = data.get("username")
+    if isinstance(name_field, str) and name_field:
+        username = name_field
+    sp = data.get("system_prompt")
+    if isinstance(sp, str):
+        _system_prompt = sp
+    temp = data.get("temperature")
+    if isinstance(temp, (int, float)):
+        _temperature = float(temp)
+    mt = data.get("max_tokens")
+    if mt is None:
+        _max_tokens = None
+    elif isinstance(mt, int) and not isinstance(mt, bool):
+        _max_tokens = mt
+
+    print(
+        f"{Fore.GREEN}[OK] Loaded session: {fname} "
+        f"({len(history)} messages){Style.RESET_ALL}"
+    )
+
+def clear_history() -> None:
+    _sessions[_current_session] = []
+    _session_last_text[_current_session] = ""
+    print(f"{Fore.GREEN}[OK] Conversation history cleared.{Style.RESET_ALL}")
+
+# ============ HELP ============
+HELP_TEXT = r"""
+PollenChat Commands:
+
+  [model]       — Select AI model
+  [system]      — Set or view the system prompt
+  [config]      — Set temperature / max_tokens
+  [stream]      — Toggle streaming / batch display mode
+  [image]       — Enter image generation mode
+  [long]        — Enter multiline input mode
+  [import]      — Import a .md/.txt file and send as user message
+  [search]      — Search conversation history
+  [render]      — Re-display last response with Markdown formatting
+  [savecode]    — Extract and save code blocks from last response
+  [export]      — Export conversation to Markdown file
+  [undo]        — Remove the last user-assistant exchange
+  [token]       — Show rough token estimate for current context
+
+  --- Sessions ---
+  [sessions]    — List all sessions
+  [switch]      — Switch to another session
+  [new]         — Create a new empty session
+  [rename]      — Rename the current session
+  [delete]      — Delete a session (not current)
+  [save]        — Save current session (legacy)
+  [load]        — Load a session from file (legacy)
+
+  [clear]       — Clear current session history
+  [history]     — Show current session history
+  [help]        — Show this help
+  [exit]        — Quit PollenChat
+
+Just type normally to chat with the AI!
+"""
+
+# ============ MAIN ============
+def main() -> None:
+    global username
+
+    ensure_dirs()
+
+    cfg = load_config()
+    apply_config(cfg)
+    _auto_load_all_sessions()
+
+    clear()
+    print(Fore.MAGENTA + BANNER + Style.RESET_ALL)
+
+    print(f"{Fore.CYAN}[~] Fetching available models from PollinationsAI...{Style.RESET_ALL}")
+    fetch_models()
+    print(f"{Fore.GREEN}[OK] {len(available_models)} models available.{Style.RESET_ALL}\n")
+
+    if not cfg.get("username"):
+        default_name = os.environ.get("USER", os.environ.get("USERNAME", "User"))
+        name_input = input(
+            f"{Fore.CYAN}[+] Your name (Enter for '{default_name}'): {Style.RESET_ALL}"
+        ).strip()
+        username = name_input if name_input else default_name
+        save_config(build_config())
+
+    print(f"{Fore.GREEN}[OK] Welcome, {username}! Type [help] for commands.{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}[OK] Current session: '{_current_session}' ({len(_sessions[_current_session])} messages){Style.RESET_ALL}\n")
+
+    try:
+        while True:
+            try:
+                prompt_str = f"{Fore.GREEN}{username}{Style.RESET_ALL}{Fore.CYAN}[{_current_session}]{Style.RESET_ALL} : "
+                user_input = input(prompt_str).strip()
+                if not user_input:
+                    continue
+
+                cmd = user_input.lower()
+
+                if cmd in ("[exit]", "exit"):
+                    print(f"{Fore.YELLOW}Bye bye, {username}!{Style.RESET_ALL}")
+                    break
+                elif cmd in ("[help]", "help"):
+                    print(HELP_TEXT)
+                elif cmd in ("[model]", "model"):
+                    select_model()
+                elif cmd in ("[system]", "system"):
+                    set_system_prompt()
+                elif cmd in ("[config]", "config"):
+                    edit_config()
+                elif cmd in ("[stream]", "stream"):
+                    toggle_stream()
+                elif cmd in ("[image]", "image"):
+                    image_mode()
+                elif cmd in ("[long]", "long"):
+                    long_text = read_multiline()
+                    if long_text.strip():
+                        preview = long_text[:300]
+                        suffix = "..." if len(long_text) > 300 else ""
+                        print(f"\n{Fore.GREEN}[Input preview]:{Style.RESET_ALL}")
+                        print(f"{preview}{suffix}\n")
+                        chat_once(long_text)
+                elif cmd in ("[import]", "import"):
+                    import_file()
+                elif cmd in ("[search]", "search"):
+                    search_history()
+                elif cmd in ("[render]", "render"):
+                    render_last()
+                elif cmd in ("[savecode]", "savecode"):
+                    save_code()
+                elif cmd in ("[export]", "export"):
+                    export_session()
+                elif cmd in ("[undo]", "undo"):
+                    undo_last()
+                elif cmd in ("[token]", "token"):
+                    estimate_tokens()
+                elif cmd in ("[sessions]", "sessions"):
+                    list_sessions()
+                elif cmd in ("[switch]", "switch"):
+                    switch_session()
+                elif cmd in ("[new]", "new"):
+                    new_session()
+                elif cmd in ("[rename]", "rename"):
+                    rename_session()
+                elif cmd in ("[delete]", "delete"):
+                    delete_session()
+                elif cmd in ("[save]", "save"):
+                    save_session()
+                elif cmd in ("[load]", "load"):
+                    load_session()
+                elif cmd in ("[clear]", "clear"):
+                    clear_history()
+                elif cmd in ("[history]", "history"):
+                    print(
+                        f"\n{Fore.YELLOW}Conversation History [{_current_session}] "
+                        f"({len(_sessions[_current_session])} messages):{Style.RESET_ALL}"
+                    )
+                    for msg in _sessions[_current_session]:
+                        role_color = Fore.GREEN if msg["role"] == "user" else Fore.MAGENTA
+                        role_label = username if msg["role"] == "user" else "AI"
+                        truncated = msg["content"][:100]
+                        suffix = "..." if len(msg["content"]) > 100 else ""
+                        print(f"  {role_color}{role_label}:{Style.RESET_ALL} {truncated}{suffix}")
+                    print()
+                else:
+                    chat_once(user_input)
+
+            except KeyboardInterrupt:
+                print(f"\n{Fore.YELLOW}[!] Use [exit] to quit.{Style.RESET_ALL}")
+            except EOFError:
+                break
+    finally:
+        _auto_save_all_sessions()
+        print(f"{Fore.GREEN}[OK] All sessions saved.{Style.RESET_ALL}")
+
+if __name__ == "__main__":
+    main()
