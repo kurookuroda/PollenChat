@@ -1,7 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PollenChat v2.8.7 — Clean CLI chat client for PollinationsAI
+PollenChat v2.8.9 — Clean CLI chat client for PollinationsAI
+
+Fixes in v2.8.9:
+  - Added _read_input() with multi-line paste detection (POSIX only).
+    Pasted text with newlines is merged into a single message instead of
+    being processed line-by-line, which caused unstoppable AI response loops.
+  - Pasted multi-line text is never interpreted as commands (prevents pasted
+    text containing bracketed words like [exit] from triggering commands).
+
+Fixes in v2.8.8:
+  - Default _stream_mode changed to False (batch) to avoid phantom input loops
+    on browser-based terminals (Colab xterm.js, etc.)
+  - Added sys.stdout.flush() guards around stream output and prompt input
+  - HELP_TEXT warns that streaming may misbehave on web terminals
 
 Fixes in v2.8.7:
   - Turn guard: truncate AI responses at fake User:/Assistant:/AI: markers
@@ -131,7 +144,7 @@ BANNER = r"""
   / /_/ / ___/ //_/ _ \   / /   / __ \/ __ `/ __/
  / ____/ /__/ ,< /  __/  / /___/ / / / /_/ / /_
 /_/    \___/_/|_|\___/   \____/_/ /_/\__,_/\__/
-                                         v2.8.7
+                                         v2.8.9
          Clean & Harmless — Powered by PollinationsAI
 """
 
@@ -144,7 +157,7 @@ current_model: str = "openai"
 _system_prompt: str = "You are a helpful assistant."
 _temperature: float = 0.7
 _max_tokens: Optional[int] = None
-_stream_mode: bool = True
+_stream_mode: bool = False  # default batch mode: safer on browser terminals
 _last_assistant_text: str = ""
 _turn_guard_enabled: bool = True  # stops AI from generating fake user/assistant turns
 
@@ -216,6 +229,48 @@ def _truncate_at_turn(text: str) -> str:
 def _ask(prompt_text: str) -> str:
     """Wrapper around input()."""
     return input(prompt_text).strip()
+
+
+def _read_input() -> tuple[str, bool]:
+    """Read input, detecting multi-line paste and merging into a single message.
+
+    When a user pastes multi-line text into a terminal, each line is fed to
+    stdin separately. We detect this by checking if more lines arrive within a
+    short timeout (0.1s) after the first line. Human typing is too slow to
+    trigger this; only pasted text does.
+
+    Returns:
+        (text, is_paste): text is the merged input, is_paste is True if
+        multiple lines were detected and merged.
+    """
+    lines = [input()]
+
+    # Pasted multi-line detection: on POSIX, select() can check if more stdin
+    # data is immediately available. Windows select() does not support stdin,
+    # so we skip detection there (pasted lines will still be fed one by one,
+    # but Windows terminal paste behaviour is less prone to this issue).
+    if os.name == "posix":
+        import select
+        try:
+            while True:
+                readable, _, _ = select.select([sys.stdin], [], [], 0.1)
+                if sys.stdin not in readable:
+                    break
+                try:
+                    lines.append(input())
+                except EOFError:
+                    break
+        except (OSError, ValueError):
+            pass
+
+    is_paste = len(lines) > 1
+    if is_paste:
+        print(
+            f"{Fore.CYAN}[~] Detected {len(lines)} pasted lines; "
+            f"merged into one message.{Style.RESET_ALL}"
+        )
+
+    return "\n".join(lines), is_paste
 
 # ============ CONFIG ============
 def load_config() -> dict:
@@ -682,7 +737,7 @@ def send_chat(
 
     headers = {
         "Content-Type": "application/json",
-        "User-Agent": "PollenChat/2.8.7",
+        "User-Agent": "PollenChat/2.8.9",
     }
 
     try:
@@ -746,6 +801,10 @@ def stream_response(response: requests.Response) -> tuple[str, bool]:
         print(f"\n{Fore.YELLOW}[!] Interrupted by user.{Style.RESET_ALL}")
     except requests.exceptions.RequestException as e:
         print(f"\n{Fore.RED}[!] Stream error: {e}{Style.RESET_ALL}")
+    finally:
+        # Defensive flush: on some terminal emulators (e.g. Colab xterm.js)
+        # streamed output can leak into the next input() buffer.
+        sys.stdout.flush()
     return full_text, completed
 
 def batch_response(response: requests.Response) -> tuple[str, bool]:
@@ -1299,7 +1358,7 @@ PollenChat Commands:
   [model]       — Select AI model
   [system]      — Set or view the system prompt
   [config]      — Set temperature / max_tokens
-  [stream]      — Toggle streaming / batch display mode
+  [stream]      — Toggle streaming / batch display mode (batch recommended on web terminals)
   [guard]       — Toggle turn guard (stops fake user/assistant turns)
   [image]       — Enter image generation mode
   [long]        — Enter multiline input mode (type [end] to finish)
@@ -1364,12 +1423,27 @@ def main() -> None:
     try:
         while True:
             try:
+                # Defensive flush before prompt: ensure no stray output
+                # leaks into input() on browser-based terminals (xterm.js, etc.)
+                sys.stdout.flush()
+                # Defensive flush before prompt: ensure no stray output
+                # leaks into input() on browser-based terminals (xterm.js, etc.)
+                sys.stdout.flush()
                 prompt_str = (
                     f"{Fore.GREEN}{username}{Style.RESET_ALL}"
                     f"{Fore.CYAN}[{_current_session}]{Style.RESET_ALL} : "
                 )
-                user_input = _ask(prompt_str)
+                print(prompt_str, end="", flush=True)
+                user_input, is_paste = _read_input()
+                user_input = user_input.strip()
                 if not user_input:
+                    continue
+
+                # Pasted multi-line text is always treated as a chat message,
+                # never as commands. This prevents pasted text containing
+                # bracketed words like [exit] from being interpreted as commands.
+                if is_paste:
+                    chat_once(user_input)
                     continue
 
                 cmd = user_input.lower()
