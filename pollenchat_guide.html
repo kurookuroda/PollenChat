@@ -1,0 +1,581 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PollenChat v2.8.1 詳細な使い方ガイド</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #0f172a;
+  --surface: #1e293b;
+  --surface-2: #334155;
+  --ink: #f1f5f9;
+  --muted: #94a3b8;
+  --accent: #38bdf8;
+  --accent-weak: color-mix(in oklab, var(--accent) 15%, var(--surface));
+  --success: #4ade80;
+  --warning: #facc15;
+  --error: #f87171;
+  --line: color-mix(in oklab, var(--ink) 10%, transparent);
+  --step-0: clamp(0.95rem, 0.92rem + 0.2vw, 1.05rem);
+  --step-1: clamp(1.1rem, 1rem + 0.5vw, 1.35rem);
+  --step-2: clamp(1.4rem, 1.2rem + 1vw, 1.9rem);
+  --step-3: clamp(1.9rem, 1.5rem + 2vw, 2.8rem);
+  --space: clamp(1.2rem, 1rem + 1vw, 2rem);
+  --radius: 10px;
+  --shadow: 0 1px 3px rgba(0,0,0,0.3), 0 8px 24px -10px rgba(0,0,0,0.5);
+}
+
+* { box-sizing: border-box; margin: 0; }
+
+body {
+  font-family: "Noto Sans JP", "Hiragino Sans", "Yu Gothic", sans-serif;
+  font-size: var(--step-0);
+  line-height: 1.85;
+  color: var(--ink);
+  background: var(--bg);
+  padding: 0;
+}
+
+header {
+  background: linear-gradient(160deg, var(--surface) 0%, var(--bg) 100%);
+  border-bottom: 1px solid var(--line);
+  padding: calc(var(--space) * 2.5) var(--space);
+  text-align: center;
+}
+
+header h1 {
+  font-size: var(--step-3);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  margin-bottom: 0.5em;
+  background: linear-gradient(90deg, var(--accent), #a78bfa);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+header p {
+  color: var(--muted);
+  font-size: var(--step-0);
+  max-width: 52ch;
+  margin: 0 auto;
+}
+
+main {
+  max-width: 76ch;
+  margin: 0 auto;
+  padding: calc(var(--space) * 1.5) var(--space);
+}
+
+section {
+  margin-bottom: calc(var(--space) * 2);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: calc(var(--space) * 1.2);
+  box-shadow: var(--shadow);
+}
+
+h2 {
+  font-size: var(--step-2);
+  font-weight: 700;
+  margin-bottom: 0.8em;
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+}
+
+h2 .num {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.65em;
+  background: var(--accent-weak);
+  color: var(--accent);
+  padding: 0.15em 0.5em;
+  border-radius: 6px;
+}
+
+h3 {
+  font-size: var(--step-1);
+  font-weight: 600;
+  margin: 1.2em 0 0.5em;
+  color: var(--ink);
+}
+
+p { margin-bottom: 1em; }
+
+.terminal {
+  background: #0b0f19;
+  border: 1px solid #1e293b;
+  border-radius: var(--radius);
+  padding: 1em 1.2em;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.88em;
+  line-height: 1.6;
+  overflow-x: auto;
+  margin: 1em 0;
+}
+
+.terminal .prompt { color: #4ade80; }
+.terminal .cmd { color: #facc15; }
+.terminal .ai { color: #38bdf8; }
+.terminal .info { color: #94a3b8; }
+.terminal .out { color: #f1f5f9; }
+.terminal .hl { color: #f87171; font-weight: 600; }
+
+.note {
+  background: var(--accent-weak);
+  border-left: 3px solid var(--accent);
+  padding: 0.8em 1em;
+  border-radius: 0 var(--radius) var(--radius) 0;
+  margin: 1em 0;
+  color: var(--ink);
+}
+
+.tip {
+  background: color-mix(in oklab, var(--success) 12%, var(--surface));
+  border-left: 3px solid var(--success);
+  padding: 0.8em 1em;
+  border-radius: 0 var(--radius) var(--radius) 0;
+  margin: 1em 0;
+}
+
+.warning {
+  background: color-mix(in oklab, var(--warning) 12%, var(--surface));
+  border-left: 3px solid var(--warning);
+  padding: 0.8em 1em;
+  border-radius: 0 var(--radius) var(--radius) 0;
+  margin: 1em 0;
+  color: var(--ink);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1em 0;
+  font-size: 0.95em;
+}
+
+th, td {
+  text-align: left;
+  padding: 0.6em 0.8em;
+  border-bottom: 1px solid var(--line);
+}
+
+th {
+  color: var(--accent);
+  font-weight: 600;
+  background: var(--accent-weak);
+}
+
+tr:last-child td { border-bottom: none; }
+
+code {
+  font-family: "JetBrains Mono", monospace;
+  background: var(--surface-2);
+  padding: 0.15em 0.4em;
+  border-radius: 4px;
+  font-size: 0.9em;
+}
+
+ul, ol {
+  margin: 0.8em 0;
+  padding-left: 1.5em;
+}
+
+li { margin-bottom: 0.4em; }
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+a:hover { text-decoration: underline; }
+
+@media print {
+  body { background: #fff; color: #000; }
+  header, section { background: #fff; border: 1px solid #ccc; }
+  .terminal { background: #f5f5f5; border: 1px solid #ddd; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>PollenChat v2.8.1</h1>
+  <p>詳細な使い方ガイド — PollinationsAI 向けクリーンな CLI チャットクライアント</p>
+</header>
+
+<main>
+
+<section>
+  <h2><span class="num">01</span> 起動と初回設定</h2>
+  <p>ターミナルで以下を実行します。</p>
+  <div class="terminal">
+<span class="prompt">$</span> <span class="cmd">python pollenchat_v2.8.1.py</span>
+  </div>
+  <p>初回起動時に名前を聞かれます。Enter で環境変数のデフォルト値が使われます。</p>
+  <div class="terminal">
+<span class="info">[~] Fetching available models from PollinationsAI...</span>
+<span class="out">[OK] 7 models available.</span>
+
+<span class="prompt">[+]</span> <span class="out">Your name (Enter for 'user'): </span><span class="cmd">Taro</span>
+<span class="out">[OK] Welcome, Taro! Type [help] for commands.</span>
+
+<span class="prompt">Taro[default] :</span>
+  </div>
+  <div class="note">
+    プロンプトの <code>[default]</code> は現在のセッション名です。複数セッションを使うと切り替わります。
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">02</span> 基本的なチャット</h2>
+  <p>コマンド以外をそのまま入力すると、AI と会話できます。</p>
+  <div class="terminal">
+<span class="prompt">Taro[default] :</span> <span class="cmd">PythonでFizzBuzzを書いて</span>
+
+<span class="ai">PollenChat (openai):</span> <span class="out">もちろんです。以下にPythonコードを示します。</span>
+<span class="out">```python</span>
+<span class="out">for i in range(1, 101):</span>
+<span class="out">    if i % 15 == 0:</span>
+<span class="out">        print("FizzBuzz")</span>
+<span class="out">    ...</span>
+<span class="out">```</span>
+  </div>
+  <p>ストリーミングモードでは、AI の応答が1文字ずつリアルタイムに表示されます。</p>
+</section>
+
+<section>
+  <h2><span class="num">03</span> モデル切り替え</h2>
+  <p><code>[model]</code> で利用するAIモデルを変更できます。</p>
+  <div class="terminal">
+<span class="prompt">Taro[default] :</span> <span class="cmd">[model]</span>
+
+<span class="out">Available models:</span>
+<span class="out">  [ ] 1. openai</span>
+<span class="out">  [ ] 2. mistral</span>
+<span class="out">  [ ] 3. llama</span>
+<span class="out">  [*] 4. claude</span>
+<span class="out">  ...</span>
+
+<span class="prompt">[+]</span> <span class="out">Select model (number or name, Enter to keep claude): </span><span class="cmd">mistral</span>
+<span class="out">[OK] Model set to: mistral</span>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">04</span> システムプロンプトの設定</h2>
+  <p><code>[system]</code> でAIの振る舞いを制御できます。</p>
+  <div class="terminal">
+<span class="prompt">Taro[default] :</span> <span class="cmd">[system]</span>
+
+<span class="out">Current system prompt:</span>
+<span class="out">  You are a helpful assistant.</span>
+
+<span class="prompt">[+]</span> <span class="out">Enter new prompt (empty line = keep, [reset] = default):</span>
+<span class="cmd">あなたは優秀なPythonプログラマーです。簡潔に回答してください。</span>
+<span class="cmd"></span>
+<span class="out">[OK] System prompt updated.</span>
+  </div>
+  <div class="tip">
+    <code>[reset]</code> と力するとデフォルトのシステムプロンプトに戻ります。
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">05</span> temperature / max_tokens の調整</h2>
+  <p><code>[config]</code> で生成パラメータを変更できます。</p>
+  <div class="terminal">
+<span class="prompt">Taro[default] :</span> <span class="cmd">[config]</span>
+
+<span class="out">Current configuration:</span>
+<span class="out">  temperature : 0.7</span>
+<span class="out">  max_tokens  : (unset / server default)</span>
+
+<span class="prompt">[+]</span> <span class="out">temperature (current: 0.7, Enter=keep, 0.0-2.0): </span><span class="cmd">1.2</span>
+<span class="out">[OK] temperature set to 1.2</span>
+
+<span class="prompt">[+]</span> <span class="out">max_tokens (current: (unset), Enter=keep, 'none'=unset): </span><span class="cmd">2048</span>
+<span class="out">[OK] max_tokens set to 2048</span>
+  </div>
+  <div class="note">
+    <code>temperature</code> は 0.0（決定的）〜 2.0（創造的）の範囲。<code>max_tokens</code> は <code>none</code> で未設定に戻せます。
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">06</span> ストリーミングモードの切り替え</h2>
+  <p><code>[stream]</code> で「1文字ずつ表示」と「完了後に一括表示」を切り替えます。</p>
+  <div class="terminal">
+<span class="prompt">Taro[default] :</span> <span class="cmd">[stream]</span>
+<span class="out">[OK] Streaming mode: OFF (batch)</span>
+  </div>
+  <p>バチモードでは、APIから全文が返ってきてから一度に表示されます。サーバー負荷を抑えたいときに便利です。</p>
+</section>
+
+<section>
+  <h2><span class="num">07</span> 画像生成</h2>
+  <p><code>[image]</code> で画像生成モードに入ります。</p>
+  <div class="terminal">
+<span class="prompt">Taro[default] :</span> <span class="cmd">[image]</span>
+
+<span class="out">Image Generation Mode</span>
+<span class="out">  Current: 1024x1024, seed=random</span>
+
+<span class="prompt">[image] Taro:</span> <span class="cmd">a cat wearing a space suit</span>
+<span class="info">[~] Generating image... prompt: a cat wearing a space suit... | size: 1024x1024 | seed: 48291</span>
+<span class="out">[OK] Image saved: pollen_images/img_20260929_143052_a_cat_wearing_a_space_s.png</span>
+  </div>
+
+  <h3>サイズとシードの変更</h3>
+  <div class="terminal">
+<span class="prompt">[image] Taro:</span> <span class="cmd">[size]</span>
+<span class="prompt">[+]</span> <span class="out">width (current: 1024): </span><span class="cmd">768</span>
+<span class="prompt">[+]</span> <span class="out">height (current: 1024): </span><span class="cmd">768</span>
+<span class="out">[OK] Size set to 768x768</span>
+
+<span class="prompt">[image] Taro:</span> <span class="cmd">[seed]</span>
+<span class="prompt">[+]</span> <span class="out">seed (current: random, 'none'=random): </span><span class="cmd">42</span>
+<span class="out">[OK] Seed fixed to 42</span>
+  </div>
+  <div class="tip">
+    シードを固定すると、同じプロンプトで同じ画像を再現できます。
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">08</span> マルチライン入力</h2>
+  <p><code>[long]</code> で長文やコードを貼り付けて送信できます。</p>
+  <div class="terminal">
+<span class="prompt">Taro[default] :</span> <span class="cmd">[long]</span>
+<span class="prompt">[+]</span> <span class="out">Multiline mode. Enter text, then a blank line to finish:</span>
+<span class="cmd">def hello():</span>
+<span class="cmd">    print("Hello, world!")</span>
+<span class="cmd"></span>
+
+<span class="out">[Input preview]:</span>
+<span class="out">def hello():</span>
+<span class="out">    print("Hello, world!")</span>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">09</span> ファイルのインポート</h2>
+  <p><code>[import]</code> で <code>.md</code> / <code>.txt</code> ファイルを読み込んで送信できます。</p>
+  <div class="terminal">
+<span class="prompt">Taro[default] :</span> <span class="cmd">[import]</span>
+<span class="prompt">[+]</span> <span class="out">File path: </span><span class="cmd">notes.md</span>
+<span class="out">[OK] Loaded 12,340 characters.</span>
+<span class="out">[Preview]: # プロジェクト仕様書 ...</span>
+
+<span class="prompt">[+]</span> <span class="out">Question about this file (Enter to send file content only): </span><span class="cmd">要約して</span>
+  </div>
+  <div class="warning">
+    200KB を超えるファイルは確認プロンプトが表示されます。巨大なファイルを誤って送信するのを防ぐための安全装置です。
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">10</span> 会話履歴の検索</h2>
+  <p><code>[search]</code> で過去のメッセージをキーワード検索できます。</p>
+  <div class="terminal">
+<span class="prompt">Taro[default] :</span> <span class="cmd">[search]</span>
+<span class="prompt">[+]</span> <span class="out">Search keyword: </span><span class="cmd">Python</span>
+
+<span class="out">3 match(es):</span>
+<span class="out">  [1]Taro: PythonでFizzBuzz書いて</span>
+<span class="out">  [5]AI: Pythonのリスト内包表記は...</span>
+<span class="out">  [8]Taro: Pythonのデコレータって何？</span>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">11</span> Markdown の再表示とコード保存</h2>
+  <p><code>[render]</code> で直前の応答をMarkdown整形して再表示。<code>[savecode]</code> でコードブロックを抽出保存します。</p>
+  <div class="terminal">
+<span class="prompt">Taro[default] :</span> <span class="cmd">[render]</span>
+<span class="out">--- Rendered (Markdown) ---</span>
+<span class="out">▶ python</span>
+<span class="out">for i in range(1, 101): ...</span>
+<span class="out">◀</span>
+<span class="out">---------------------------</span>
+
+<span class="prompt">Taro[default] :</span> <span class="cmd">[savecode]</span>
+<span class="out">Code blocks found: 1</span>
+<span class="out">  1. [python] 5 lines — for i in range...</span>
+
+<span class="prompt">[+]</span> <span class="out">Select block number (Enter = 1, [all] = save each): </span><span class="cmd">1</span>
+<span class="prompt">[+]</span> <span class="out">Filename (Enter for 'snippet.py'): </span><span class="cmd">fizzbuzz.py</span>
+<span class="out">[OK] Code saved: pollen_codes/fizzbuzz.py</span>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">12</span> セッションのエクスポート</h2>
+  <p><code>[export]</code> で現在の会話をMarkdownファイルに出力します。</p>
+  <div class="terminal">
+<span class="prompt">Taro[default] :</span> <span class="cmd">[export]</span>
+<span class="prompt">[+]</span> <span class="out">Export filename (Enter for auto): </span><span class="cmd">project_discussion</span>
+<span class="prompt">[+]</span> <span class="out">Include system prompt in export? y/N: </span><span class="cmd">n</span>
+<span class="out">[OK] Exported to: pollen_exports/project_discussion.md</span>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">13</span> Undo とトークン概算</h2>
+  <p><code>[undo]</code> で直前のやり取りを削除。<code>[token]</code> で現在のコンテキストの概算トークン数を確認できます。</p>
+  <div class="terminal">
+<span class="prompt">Taro[default] :</span> <span class="cmd">[undo]</span>
+<span class="out">[OK] Undid last exchange (2 message(s)). History now: 5 messages.</span>
+
+<span class="prompt">Taro[default] :</span> <span class="cmd">[token]</span>
+<span class="out">Token estimate (default):</span>
+<span class="out">  Approximate tokens : 1,234</span>
+<span class="out">  Total characters   : 5,678</span>
+<span class="out">  ASCII chars        : 3,456</span>
+<span class="out">  Non-ASCII chars    : 2,222</span>
+<span class="info">  ※ This is a rough estimate. Actual tokenizer counts may differ.</span>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">14</span> 複数セッション管理</h2>
+  <p>v2.8 の目玉機能です。複数の会話を並行して管理できます。</p>
+
+  <h3>セッション一覧と切り替え</h3>
+  <div class="terminal">
+<span class="prompt">Taro[default] :</span> <span class="cmd">[new]</span>
+<span class="prompt">[+]</span> <span class="out">New session name: </span><span class="cmd">work</span>
+<span class="out">[OK] Created and switched to 'work'</span>
+
+<span class="prompt">Taro[work] :</span> <span class="cmd">プロジェクトAの要件を整理して</span>
+
+<span class="prompt">Taro[work] :</span> <span class="cmd">[switch]</span>
+<span class="out">Sessions:</span>
+<span class="out">  [*] 1. default (3 messages)</span>
+<span class="out">  [ ] 2. work (2 messages)</span>
+
+<span class="prompt">[+]</span> <span class="out">Switch to (number or name): </span><span class="cmd">default</span>
+<span class="out">[OK] Switched to 'default' (3 messages)</span>
+
+<span class="prompt">Taro[default] :</span>
+  </div>
+
+  <h3>セッションのリネームと削除</h3>
+  <div class="terminal">
+<span class="prompt">Taro[default] :</span> <span class="cmd">[rename]</span>
+<span class="prompt">[+]</span> <span class="out">Rename 'default' to: </span><span class="cmd">hobby</span>
+<span class="out">[OK] Renamed 'default' → 'hobby'</span>
+
+<span class="prompt">Taro[hobby] :</span> <span class="cmd">[delete]</span>
+<span class="prompt">[+]</span> <span class="out">Delete session (name, Enter=cancel): </span><span class="cmd">work</span>
+<span class="hl">[!]</span> <span class="out">Really delete 'work'? type 'yes': </span><span class="cmd">yes</span>
+<span class="out">[OK] Deleted 'work'</span>
+  </div>
+  <div class="warning">
+    現在アクティブなセッションは削除できません。削除前に <code>[switch]</code> で別のセッションに移ってください。
+  </div>
+
+  <h3>自動保存・自動読込</h3>
+  <p>終了時に全セッションが自動保存され、次回起動時に自で復元されます。</p>
+  <div class="terminal">
+<span class="prompt">Taro[hobby] :</span> <span class="cmd">[exit]</span>
+<span class="out">Bye bye, Taro!</span>
+<span class="out">[OK] All sessions saved.</span>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">15</span> 便利なワークフロー例</h2>
+
+  <h3>ワークフロー1: 仕事と趣味を分ける</h3>
+  <div class="terminal">
+<span class="prompt">Taro[default] :</span> <span class="cmd">[new]</span>
+<span class="cmd">work</span>
+<span class="prompt">Taro[work] :</span> <span class="cmd">[system]</span>
+<span class="cmd">あなたは優秀な技術顧問です。</span>
+<span class="cmd"></span>
+<span class="prompt">Taro[work] :</span> <span class="cmd">API設計のベストプラクティスを教えて</span>
+
+<span class="prompt">Taro[work] :</span> <span class="cmd">[switch]</span>
+<span class="cmd">default</span>
+<span class="prompt">Taro[default] :</span> <span class="cmd">[rename]</span>
+<span class="cmd">hobby</span>
+<span class="prompt">Taro[hobby] :</span> <span class="cmd">週末のキャンプ計画を立てて</span>
+  </div>
+
+  <h3>ワークフロー2: 長文ドキュメントを読み込んで質問</h3>
+  <div class="terminal">
+<span class="prompt">Taro[work] :</span> <span class="cmd">[import]</span>
+<span class="cmd">spec.md</span>
+<span class="cmd">この仕様書に不足している項目は？</span>
+  </div>
+
+  <h3>ワークフロー3: コード生成→保存→エクスポート</h3>
+  <div class="terminal">
+<span class="prompt">Taro[work] :</span> <span class="cmd">FastAPIのCRUDサンプルを書いて</span>
+<span class="prompt">Taro[work] :</span> <span class="cmd">[savecode]</span>
+<span class="cmd">1</span>
+<span class="cmd">crud.py</span>
+<span class="prompt">Taro[work] :</span> <span class="cmd">[export]</span>
+<span class="cmd">fastapi_chat.md</span>
+<span class="cmd">n</span>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">16</span> コマンド早見表</h2>
+  <table>
+    <tr><th>コマンド</th><th>用途</th></tr>
+    <tr><td><code>[model]</code></td><td>AIモデルを切り替え</td></tr>
+    <tr><td><code>[system]</code></td><td>システムプロンプトを設定</td></tr>
+    <tr><td><code>[config]</code></td><td>temperature / max_tokens を調整</td></tr>
+    <tr><td><code>[stream]</code></td><td>ストリーミング ON/OFF 切りえ</td></tr>
+    <tr><td><code>[image]</code></td><td>画像生成モード</td></tr>
+    <tr><td><code>[long]</code></td><td>マルチライン入力</td></tr>
+    <tr><td><code>[import]</code></td><td>.md / .txt ファイルを読み込んで送信</td></tr>
+    <tr><td><code>[search]</code></td><td>会話履歴を検索</td></tr>
+    <tr><td><code>[render]</code></td><td>直前の応答をMarkdown再表示</td></tr>
+    <tr><td><code>[savecode]</code></td><td>コードブロックをファイル保存</td></tr>
+    <tr><td><code>[export]</code></td><td>会話をMarkdownファイルにエクスポート</td></tr>
+    <tr><td><code>[undo]</code></td><td>直前のやり取りを削除</td></tr>
+    <tr><td><code>[token]</code></td><td>概算トークン数を表示</td></tr>
+    <tr><td><code>[sessions]</code></td><td>セッション一覧</td></tr>
+    <tr><td><code>[switch]</code></td><td>セッション切り替え</td></tr>
+    <tr><td><code>[new]</code></td><td>新規セッション作成</td></tr>
+    <tr><td><code>[rename]</code></td><td>セッション名変更</td></tr>
+    <tr><td><code>[delete]</code></td><td>セッション削除</td></tr>
+    <tr><td><code>[clear]</code></td><td>現在のセッション履歴をクリア</td></tr>
+    <tr><td><code>[history]</code></td><td>現在のセッション履歴を表示</td></tr>
+    <tr><td><code>[help]</code></td><td>ヘルプ表示</td></tr>
+    <tr><td><code>[exit]</code></td><td>終了（自動保存あり）</td></tr>
+  </table>
+</section>
+
+<section>
+  <h2><span class="num">17</span> トラブルシューティング</h2>
+
+  <h3>HTTP 429 (Rate Limited)</h3>
+  <p>PollinationsAI の無料 tier にはレート制限があります。数秒〜数十秒待ってから再試行してください。</p>
+
+  <h3>モデルが応答しない</h3>
+  <p><code>[model]</code> で別のモデルに切り替えてみてください。PollinationsAI のモデル可用性は変動します。</p>
+
+  <h3>セッションが復元されない</h3>
+  <p><code>sessions/</code> ディレクトリ内の <code>.json</code> ファイルを確認してください。手動でファイルを移動した場合は、起動時に自動読込されます。</p>
+
+  <h3>巨大なファイルの送信を防ぎたい</h3>
+  <p><code>[import]</code> は 200KB を超えるファイルで確認プロンプトを表示します。それ以上のサイズ制限を設けたい場合は、スクリプト内の <code>IMPORT_MAX_BYTES</code> を変更してください。</p>
+</section>
+
+</main>
+
+</body>
+</html>
