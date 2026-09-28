@@ -1,0 +1,109 @@
+# PollenChat
+
+A clean, harmless CLI chat client for [PollinationsAI](https://pollinations.ai/).
+
+PollenChat is a lightweight terminal-based chat application that lets you talk to various AI models (OpenAI, Mistral, Llama, Claude, Gemini, etc.) through the PollinationsAI free API. It also supports image generation, session management, code extraction, and more.
+
+## Features
+
+- **Multi-model chat** — Switch between models via `[model]`
+- **Streaming & batch modes** — Toggle live token-by-token output or wait-for-complete display
+- **System prompt editing** — Customize the assistant's behavior with `[system]`
+- **Temperature / max_tokens control** — Fine-tune generation parameters with `[config]`
+- **Image generation** — Generate images from text prompts inside `[image]` mode, with configurable size and seed
+- **Multiline input** — Paste or type long messages with `[long]`
+- **File import** — Load `.md` or `.txt` files and send them as user messages with `[import]`
+- **Conversation search** — Find past messages with `[search]`
+- **Markdown rendering** — Re-display the last response with formatted Markdown via `[render]`
+- **Code extraction** — Save code blocks from the last response with `[savecode]`
+- **Session export** — Export conversations to Markdown files with `[export]`
+- **Undo** — Remove the last user-assistant exchange with `[undo]`
+- **Token estimate** — Rough token count estimation for the current context with `[token]`
+- **Session save/load** — Persist conversations as JSON with `[save]` / `[load]`
+- **History management** — View or clear conversation history
+
+## Installation
+
+```bash
+# Clone or download pollenchat_v2.7.1.py
+git clone https://github.com/yourname/pollenchat.git
+cd pollenchat
+
+# Install dependencies
+pip install -r requirements.txt
+```
+
+## Quick Start
+
+```bash
+python pollenchat_v2.7.1.py
+```
+
+On first launch you will be asked for your name. After that, just type normally to chat. Use `[help]` to see all available commands.
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+ `[model]` | Select AI model |
+ `[system]` | Set or view the system prompt |
+ `[config]` | Set `temperature` / `max_tokens` |
+ `[stream]` | Toggle streaming / batch display mode |
+ `[image]` | Enter image generation mode |
+ `[long]` | Enter multiline input mode |
+ `[import]` | Import a `.md` / `.txt` file and send as user message |
+ `[search]` | Search conversation history |
+ `[render]` | Re-display last response with Markdown formatting |
+ `[savecode]` | Extract and save code blocks from last response |
+ `[export]` | Export conversation to Markdown file |
+ `[undo]` | Remove the last user-assistant exchange |
+ `[token]` | Show rough token estimate for current context |
+ `[save]` | Save current session |
+ `[load]` | Load a saved session |
+ `[clear]` | Clear conversation history |
+ `[history]` | Show conversation history |
+ `[help]` | Show help |
+ `[exit]` | Quit PollenChat |
+
+## Directories
+
+PollenChat creates the following directories in its working folder:
+
+- `sessions/` — Saved session JSON files
+- `pollen_images/` — Generated images
+- `pollen_codes/` — Extracted code blocks
+- `pollen_exports/` — Exported Markdown conversations
+- `config.json` — User preferences (model, system prompt, username, etc.)
+
+## Image Generation
+
+Inside `[image]` mode you can:
+
+- Type a prompt to generate an image
+- Use `[size]` to change width/height (default 1024x1024)
+- Use `[seed]` to fix a random seed for reproducible images
+- Type `exit` to return to chat mode
+
+## Importing Files
+
+`[import]` reads `.md` or `.txt` files and sends them as a user message. You can optionally append a question after the file content. Files larger than 200 KB trigger a confirmation prompt to avoid accidentally sending huge payloads.
+
+## Token Estimate
+
+`[token]` provides a rough token count based on character counts:
+
+- ASCII characters: ~4 chars per token
+- Non-ASCII characters: ~1.5 chars per token
+
+This is only an approximation. Actual token counts depend on the model's tokenizer.
+
+## Notes
+
+- PollinationsAI has rate limits on its free tier. If you see HTTP 429, wait a moment and retry.
+- The `max_tokens` parameter is optional; if unset, the server default is used.
+- Image generation parameters (width, height, seed) are session-only and not persisted to `config.json`.
+- Session files store model, username, system prompt, temperature, max_tokens, and conversation history.
+
+## License
+
+MIT License — feel free to use, modify, and distribute.
