@@ -1130,6 +1130,225 @@ def export_session() -> None:
     except OSError as e:
         print(f"{Fore.RED}[!] Export failed: {e}{Style.RESET_ALL}")
 
+# ============ EXPORT (exchange range) ============
+# One "exchange" = an assistant message plus the user message right before it.
+# Indexes follow Python lists: 0 = oldest, -1 = latest. Ranges are slices
+# (start:stop:step, stop excluded), e.g. [export -3:] [export 2:5] [export ::-1].
+EXPORT_Q_LIMIT = 500   # longer questions are shortened unless "full" is given
+EXPORT_Q_HEAD = 350
+EXPORT_Q_TAIL = 150
+
+_EXPORT_CMD_RE = re.compile(r"^\[export\s+(.*?)\s*\]$", re.IGNORECASE)
+_EXPORT_INDEX_RE = re.compile(r"^-?\d+$")
+_EXPORT_SLICE_RE = re.compile(r"^(-?\d*):(-?\d*)(?::(-?\d*))?$")
+_EXPORT_FLAGS = ("rev", "bare", "full")
+
+EXPORT_USAGE = (
+    "Usage: [export] | [export list] | [export <index|slice> [rev] [bare] [full]]\n"
+    "  index : 0 = oldest, -1 = latest          e.g. [export -1]\n"
+    "  slice : start:stop:step (stop excluded)  e.g. [export -3:]  [export 2:5]  [export ::-1]\n"
+    "  rev   : reverse the selected order       bare : answers only\n"
+    "  full  : do not shorten long questions"
+)
+
+
+def _exchanges() -> list[tuple[str, str]]:
+    """(question, answer) pairs of the current session, oldest first."""
+    history = _sessions[_current_session]
+    result: list[tuple[str, str]] = []
+    for i, msg in enumerate(history):
+        if msg["role"] != "assistant":
+            continue
+        question = ""
+        if i > 0 and history[i - 1]["role"] == "user":
+            question = history[i - 1]["content"]
+        result.append((question, msg["content"]))
+    return result
+
+
+def _parse_export_args(raw: str, n: int) -> tuple[Optional[dict], Optional[str]]:
+    """Parse the text inside [export ...]. Returns (parsed, error)."""
+    tokens = raw.lower().split()
+    if "list" in tokens:
+        if len(tokens) > 1:
+            return None, "'list' cannot be combined with other arguments."
+        return {"list": True}, None
+
+    flags: set[str] = set()
+    sel: Optional[str] = None
+    for tok in tokens:
+        if tok in _EXPORT_FLAGS:
+            flags.add(tok)
+        elif _EXPORT_INDEX_RE.match(tok) or _EXPORT_SLICE_RE.match(tok):
+            if sel is not None:
+                return None, "Only one index or slice is allowed."
+            sel = tok
+        else:
+            return None, f"Unknown argument: {tok}"
+
+    if sel is None:
+        picked = list(range(n))
+        sel_text = ":"
+    elif _EXPORT_INDEX_RE.match(sel):
+        k = int(sel)
+        if not (-n <= k < n):
+            return None, f"Index {k} out of range (valid: {-n} to {n - 1})."
+        picked = [k % n]
+        sel_text = sel
+    else:
+        parts = [int(x) if x else None for x in _EXPORT_SLICE_RE.match(sel).groups()]
+        if parts[2] == 0:
+            return None, "Slice step cannot be zero."
+        picked = list(range(n))[slice(*parts)]
+        sel_text = sel
+
+    if "rev" in flags:
+        picked.reverse()
+    return {"picked": picked, "flags": flags, "sel": sel_text}, None
+
+
+def _balance_fences(text: str, inside: bool = False) -> str:
+    """Make sure ``` fences in a cut-out piece are paired."""
+    if inside:
+        text = "```\n" + text
+    if text.count("```") % 2 == 1:
+        text += "\n```"
+    return text
+
+
+def _shorten_question(q: str) -> str:
+    """Keep head + tail of a long question (imported files put the real
+    question at the END of the message)."""
+    if len(q) <= EXPORT_Q_LIMIT:
+        return q
+    head = q[:EXPORT_Q_HEAD]
+    tail = q[-EXPORT_Q_TAIL:]
+    tail_inside = q[: len(q) - EXPORT_Q_TAIL].count("```") % 2 == 1
+    note = (
+        f"…（全 {len(q):,} 文字のうち先頭 {EXPORT_Q_HEAD} 文字と"
+        f"末尾 {EXPORT_Q_TAIL} 文字を表示）…"
+    )
+    short = f"{_balance_fences(head)}\n\n{note}\n\n{_balance_fences(tail, tail_inside)}"
+    return short if len(short) < len(q) else q  # never make it longer
+
+
+def _quote(text: str) -> str:
+    lines = text.splitlines() or [""]
+    return "\n".join(f"> {ln}" if ln else ">" for ln in lines)
+
+
+def _build_exchange_md(
+    exs: list[tuple[str, str]], picked: list[int], flags: set[str], sel_text: str
+) -> str:
+    n = len(exs)
+
+    def heading(i: int) -> str:
+        return f"## #{i} ({i - n})"
+
+    if "bare" in flags:
+        if len(picked) == 1:
+            return exs[picked[0]][1].rstrip("\n") + "\n"
+        blocks = [f"{heading(i)}\n\n{exs[i][1].rstrip()}" for i in picked]
+        return "\n\n---\n\n".join(blocks) + "\n"
+
+    if len(picked) == 1:
+        order = "1 exchange"
+    else:
+        if picked == sorted(picked):
+            how = "oldest first"
+        elif picked == sorted(picked, reverse=True):
+            how = "newest first"
+        else:
+            how = "custom order"
+        order = f"{len(picked)} exchanges, {how}"
+
+    lines = [
+        "# PollenChat Export\n",
+        f"- **Session:** {_current_session}\n",
+        f"- **Selection:** {sel_text} ({order})\n",
+        f"- **Model:** {current_model} (at export)\n",
+        f"- **Date:** {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}\n",
+        "\n---\n",
+    ]
+    for i in picked:
+        question, answer = exs[i]
+        lines.append(f"\n{heading(i)}\n")
+        if question:
+            q = question if "full" in flags else _shorten_question(question)
+            lines.append(f"\n### User\n\n{_quote(q)}\n")
+        lines.append(f"\n### Assistant\n\n{answer.rstrip()}\n")
+        lines.append("\n---\n")
+    lines.append("\n*Exported by PollenChat*\n")
+    return "".join(lines)
+
+
+def _export_filename(picked: list[int], flags: set[str]) -> str:
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    lo, hi = min(picked), max(picked)
+    span = f"{lo:04d}" if lo == hi else f"{lo:04d}-{hi:04d}"
+    if len(picked) > 1 and sorted(picked) != list(range(lo, hi + 1)):
+        span += "_sparse"
+    suffix = "".join(f"_{f}" for f in _EXPORT_FLAGS if f in flags)
+    base = f"export_{ts}_{_safe_filename(_current_session)}_{span}{suffix}"
+    name = f"{base}.md"
+    k = 2
+    while os.path.exists(os.path.join(EXPORT_DIR, name)):
+        name = f"{base}_{k}.md"
+        k += 1
+    return name
+
+
+def _one_line(text: str, limit: int) -> str:
+    flat = " ".join(text.split())
+    return flat if len(flat) <= limit else flat[:limit] + "…"
+
+
+def _print_exchange_list(exs: list[tuple[str, str]]) -> None:
+    n = len(exs)
+    w = len(str(n - 1))
+    print(
+        f"\n{Fore.YELLOW}Exchanges in '{_current_session}' "
+        f"(oldest first, {n} total):{Style.RESET_ALL}"
+    )
+    for i, (q, a) in enumerate(exs):
+        print(
+            f"  [{i:>{w}}] ({i - n:>{w + 1}}) "
+            f"Q: {_one_line(q, 40) or '-'} | A: {_one_line(a, 40)}"
+        )
+    print()
+
+
+def export_exchanges(raw: str) -> None:
+    """[export <index|slice> [rev] [bare] [full]] and [export list]."""
+    exs = _exchanges()
+    if not exs:
+        print(f"{Fore.YELLOW}[~] No conversation to export.{Style.RESET_ALL}")
+        return
+
+    parsed, err = _parse_export_args(raw, len(exs))
+    if err or parsed is None:
+        print(f"{Fore.RED}[!] {err}{Style.RESET_ALL}\n{EXPORT_USAGE}")
+        return
+    if parsed.get("list"):
+        _print_exchange_list(exs)
+        return
+
+    picked = parsed["picked"]
+    if not picked:
+        print(f"{Fore.YELLOW}[~] Nothing matches that selection.{Style.RESET_ALL}")
+        return
+
+    md = _build_exchange_md(exs, picked, parsed["flags"], parsed["sel"])
+    path = os.path.join(EXPORT_DIR, _export_filename(picked, parsed["flags"]))
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(md)
+        print(
+            f"{Fore.GREEN}[OK] Exported {len(picked)} exchange(s) to: {path}{Style.RESET_ALL}"
+        )
+    except OSError as e:
+        print(f"{Fore.RED}[!] Export failed: {e}{Style.RESET_ALL}")
+
 # ============ IMPORT ============
 def import_file() -> None:
     raw_path = _ask(f"{Fore.CYAN}[+] File path: {Style.RESET_ALL}")
@@ -1497,6 +1716,10 @@ PollenChat Commands:
   [render]      — Re-display last response with Markdown formatting
   [savecode]    — Extract and save code blocks from last response
   [export]      — Export conversation to Markdown file
+  [export list] — List Q&A exchanges with indexes (0 = oldest, -1 = latest)
+  [export -1]   — Export exchange(s) by index or slice (stop excluded):
+                  [export -3:]  [export 2:5]  [export ::-1]
+                  flags: rev (reverse order) / bare (answers only) / full (keep long questions)
   [undo]        — Remove the last user-assistant exchange
   [token]       — Show rough token estimate for current context
 
@@ -1574,6 +1797,14 @@ def main() -> None:
                     continue
 
                 cmd = user_input.lower()
+
+                m_exp = _EXPORT_CMD_RE.match(user_input)
+                if m_exp:
+                    export_exchanges(m_exp.group(1))
+                    continue
+                if cmd.startswith("[export "):
+                    print(f"{Fore.RED}[!] Malformed export command.{Style.RESET_ALL}\n{EXPORT_USAGE}")
+                    continue
 
                 if cmd in ("[exit]", "exit"):
                     print(f"{Fore.YELLOW}Bye bye, {username}!{Style.RESET_ALL}")
