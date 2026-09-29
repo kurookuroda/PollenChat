@@ -85,6 +85,10 @@ Fixes in v2.8.2:
   - _prompt_float unused "current" argument removed
 
 Fixes in v2.8.11:
+  - _read_input() now accepts a prompt argument and passes it to input().
+    The main-loop prompt (username[session] :) is no longer printed with
+    print(..., end=""), which was invisible to readline and could disappear
+    on line redraw (Backspace-to-start, Home key, terminal resize, etc.).
   - Improved HTTP error handling in send_chat(): 5xx errors now show the
     actual server reason (from JSON "error" field or response body) instead
     of relying on fragile notification-string matching. All 5xx are reported
@@ -334,7 +338,7 @@ def _ask(prompt_text: str, multiline: bool = False) -> str:
     return first.strip()
 
 
-def _read_input() -> tuple[str, bool]:
+def _read_input(prompt: str = "") -> tuple[str, bool]:
     """Read input, detecting multi-line paste and merging into a single message.
 
     When a user pastes multi-line text into a terminal, each line is fed to
@@ -342,11 +346,15 @@ def _read_input() -> tuple[str, bool]:
     short timeout (0.1s) after the first line. Human typing is too slow to
     trigger this; only pasted text does.
 
+    Args:
+        prompt: Prompt string passed directly to input() so readline knows
+            the display width and can redraw it correctly on line editing.
+
     Returns:
         (text, is_paste): text is the merged input, is_paste is True if
         multiple lines were detected and merged.
     """
-    lines = [input()] + _pending_lines()
+    lines = [input(prompt)] + _pending_lines()
 
     is_paste = len(lines) > 1
     if is_paste:
@@ -1595,8 +1603,7 @@ def main() -> None:
                     f"{Fore.GREEN}{username}{Style.RESET_ALL}"
                     f"{Fore.CYAN}[{_current_session}]{Style.RESET_ALL} : "
                 )
-                print(prompt_str, end="", flush=True)
-                user_input, is_paste = _read_input()
+                user_input, is_paste = _read_input(prompt_str)
                 user_input = user_input.strip()
                 if not user_input:
                     continue
