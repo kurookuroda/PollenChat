@@ -1,7 +1,24 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PollenChat v2.8.10 — Clean CLI chat client for PollinationsAI
+PollenChat v2.8.11 — Clean CLI chat client for PollinationsAI
+
+Fixes in v2.8.11:
+  - [export] by exchange (question + answer): [export list], [export -1],
+    [export -3:], [export 2:5], [export ::-1] with rev / bare / full flags.
+    Indexes and slices follow Python (0 = oldest, -1 = latest, stop excluded).
+    Long questions are shortened to head + tail with a note.
+  - send_chat: HTTP errors now show the server's reason. New helper
+    _server_error_text() reads the JSON "error" field (or the response body).
+    5xx are reported as server-side problems, 429 keeps its rate-limit
+    message, and other codes (402, 404, ...) get the reason appended.
+  - Input prompt: the "user[session] :" prompt is now passed to input() via
+    _read_input(prompt) so readline knows about it. It used to be printed
+    separately, and line editing (Backspace to line start, Home, history
+    redraw) erased it. On GNU readline the colour codes are marked as
+    zero-width with 0x01/0x02 (_rl_safe) so long lines keep the correct
+    cursor position. _ask() prompts ([model], [import], ...) go through
+    _rl_safe() as well. Paste merging in _pending_lines() is unchanged.
 
 Fixes in v2.8.10:
   - _truncate_at_turn now requires 2+ turn markers (outside ``` blocks)
@@ -112,8 +129,10 @@ init(autoreset=True)
 # (no effect on Windows without pyreadline, but harmless)
 try:
     import readline  # noqa: F401
+    # libedit (macOS) treats prompt markers differently: only GNU readline gets them
+    _READLINE_GNU = "libedit" not in (readline.__doc__ or "")
 except ImportError:
-    pass
+    _READLINE_GNU = False
 
 # ============ CONFIG ============
 API_BASE = "https://text.pollinations.ai/openai"
@@ -161,7 +180,7 @@ BANNER = r"""
   / /_/ / ___/ //_/ _ \   / /   / __ \/ __ `/ __/
  / ____/ /__/ ,< /  __/  / /___/ / / / /_/ / /_
 /_/    \___/_/|_|\___/   \____/_/ /_/\__,_/\__/
-                                         v2.8.10
+                                         v2.8.11
          Clean & Harmless — Powered by PollinationsAI
 """
 
@@ -314,7 +333,7 @@ def _ask(prompt_text: str, multiline: bool = False) -> str:
     multiline=True they are joined into the answer; otherwise they are
     discarded with a notice.
     """
-    first = input(prompt_text)
+    first = input(_rl_safe(prompt_text))
     extra = _pending_lines()
     if extra:
         if multiline:
@@ -326,8 +345,21 @@ def _ask(prompt_text: str, multiline: bool = False) -> str:
     return first.strip()
 
 
-def _read_input() -> tuple[str, bool]:
+def _rl_safe(prompt: str) -> str:
+    """Mark ANSI colour codes in a prompt as zero-width for GNU readline.
+
+    Without the 0x01 ... 0x02 markers readline counts the escape bytes as
+    visible columns and mis-places the cursor on long lines.
+    """
+    if not _READLINE_GNU:
+        return prompt
+    return re.sub(r"(\x1b\[[0-9;]*m)", "\x01\\1\x02", prompt)
+
+
+def _read_input(prompt: str = "") -> tuple[str, bool]:
     """Read input, detecting multi-line paste and merging into a single message.
+
+    The prompt is passed to input() so that readline manages it (redraws keep it).
 
     When a user pastes multi-line text into a terminal, each line is fed to
     stdin separately. We detect this by checking if more lines arrive within a
@@ -338,7 +370,7 @@ def _read_input() -> tuple[str, bool]:
         (text, is_paste): text is the merged input, is_paste is True if
         multiple lines were detected and merged.
     """
-    lines = [input()] + _pending_lines()
+    lines = [input(prompt)] + _pending_lines()
 
     is_paste = len(lines) > 1
     if is_paste:
@@ -803,6 +835,19 @@ def delete_session() -> None:
     print(f"{Fore.GREEN}[OK] Deleted '{name}'{Style.RESET_ALL}")
 
 # ============ CHAT ============
+def _server_error_text(resp: Optional[requests.Response]) -> str:
+    """Short reason taken from an error response body (JSON "error" field if present)."""
+    if resp is None:
+        return ""
+    try:
+        data = resp.json()
+        if isinstance(data, dict) and data.get("error"):
+            return str(data["error"])[:200]
+    except ValueError:
+        pass
+    text = (resp.text or "").strip()
+    return "" if text in ("", "{}") else text[:200]
+
 def send_chat(
     messages: list[dict[str, str]], stream: bool = True
 ) -> Optional[requests.Response]:
@@ -817,7 +862,7 @@ def send_chat(
 
     headers = {
         "Content-Type": "application/json",
-        "User-Agent": "PollenChat/2.8.10",
+        "User-Agent": "PollenChat/2.8.11",
     }
 
     try:
@@ -828,13 +873,19 @@ def send_chat(
         response.raise_for_status()
         return response
     except requests.exceptions.HTTPError as e:
-        if e.response is not None and e.response.status_code == 429:
+        code = e.response.status_code if e.response is not None else None
+        reason = _server_error_text(e.response)
+        if code == 429:
             print(
                 f"{Fore.RED}[!] Rate limited (429). "
                 f"PollinationsAI free tier has limits. Wait a moment and retry.{Style.RESET_ALL}"
             )
+        elif code is not None and code >= 500:
+            print(f"{Fore.RED}[!] HTTP {code} from server: {reason or '(no details)'}{Style.RESET_ALL}")
+            print(f"{Fore.YELLOW}    Server-side problem, not a PollenChat bug. Retry later.{Style.RESET_ALL}")
         else:
-            print(f"{Fore.RED}[!] HTTP Error: {e}{Style.RESET_ALL}")
+            detail = f" — {reason}" if reason else ""
+            print(f"{Fore.RED}[!] HTTP Error: {e}{detail}{Style.RESET_ALL}")
         return None
     except Exception as e:
         print(f"{Fore.RED}[!] Request failed: {e}{Style.RESET_ALL}")
@@ -1783,8 +1834,7 @@ def main() -> None:
                     f"{Fore.GREEN}{username}{Style.RESET_ALL}"
                     f"{Fore.CYAN}[{_current_session}]{Style.RESET_ALL} : "
                 )
-                print(prompt_str, end="", flush=True)
-                user_input, is_paste = _read_input()
+                user_input, is_paste = _read_input(_rl_safe(prompt_str))
                 user_input = user_input.strip()
                 if not user_input:
                     continue
