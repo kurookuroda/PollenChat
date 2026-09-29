@@ -1,31 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PollenChat v2.8.11 â Clean CLI chat client for PollinationsAI
-
-Fixes in v2.8.11:
-  - _read_input() now accepts a prompt argument and passes it to input().
-    The main-loop prompt (username[session] :) is no longer printed with
-    print(..., end=""), which was invisible to readline and could disappear
-    on line redraw (Backspace-to-start, Home key, terminal resize, etc.).
-  - Improved HTTP error handling in send_chat(): 5xx errors now show the
-    actual server reason (from JSON "error" field or response body) instead
-    of relying on fragile notification-string matching. All 5xx are reported
-    as server-side problems with "retry later" guidance. 429 keeps its
-    dedicated rate-limit message. 4xx and others preserve the response body
-    reason when available.
+PollenChat v2.8.10 — Clean CLI chat client for PollinationsAI
 
 Fixes in v2.8.10:
   - _truncate_at_turn now requires 2+ turn markers (outside ``` blocks)
     before truncating. This reduces false positives: a single role label
     like "AI:" or "User:" in definitions / examples / translation tables
     is no longer cut.  Note that text with 2+ labels (e.g. a translation
-    table with both "User:" and "AI:") is still truncated â use batch mode
+    table with both "User:" and "AI:") is still truncated — use batch mode
     or turn guard OFF for such content.
   - stream_response: when exactly one marker is seen during streaming,
     display is held back from that point onward until either (a) a second
     marker confirms a fake turn (truncate) or (b) the stream ends with only
-    one marker (legitimate content â flush the held-back tail). This prevents
+    one marker (legitimate content — flush the held-back tail). This prevents
     the first fake "User:" line from appearing on screen before truncation.
   - Fixed: _find_turn_markers() now checks _turn_guard_enabled so guard OFF
     no longer truncates or holds back display in stream mode.
@@ -52,7 +40,7 @@ Fixes in v2.8.7:
   - [guard] command to toggle turn guard (default: ON)
 
 Fixes in v2.8.6:
-  - Removed / ANSI wrapping in _rl_prompt() to prevent readline/libedit
+  - Removed \001/\002 ANSI wrapping in _rl_prompt() to prevent readline/libedit
     from mis-handling prompts and causing phantom auto-input on some terminals
 
 Fixes in v2.8.5:
@@ -88,7 +76,7 @@ Fixes in v2.8.2:
   - Atomic per-session auto-save after every successful chat_once
   - _auto_load_all_sessions warns about broken JSON instead of silently skipping
   - batch_response / stream_response guard against malformed choices
-  - Image size validation (64â4096)
+  - Image size validation (64–4096)
   - Seed=0 is now handled correctly (0 is falsy but valid)
   - import_file: expand ~ and strip surrounding quotes from path
   - readline support on Unix for arrow-key editing
@@ -173,8 +161,8 @@ BANNER = r"""
   / /_/ / ___/ //_/ _ \   / /   / __ \/ __ `/ __/
  / ____/ /__/ ,< /  __/  / /___/ / / / /_/ / /_
 /_/    \___/_/|_|\___/   \____/_/ /_/\__,_/\__/
-                                         v2.8.11
-         Clean & Harmless â Powered by PollinationsAI
+                                         v2.8.10
+         Clean & Harmless — Powered by PollinationsAI
 """
 
 # ============ STATE ============
@@ -216,12 +204,12 @@ def _safe_session_name(name: str) -> str:
 
 def _safe_filename(name: str) -> str:
     name = os.path.basename(name.strip())
-    name = re.sub(r'[\/:*?"<>|]', "_", name)
+    name = re.sub(r'[\\/:*?"<>|]', "_", name)
     return name or "snippet"
 
 def _sanitize_session_name(name: str) -> str:
     name = name.strip()
-    name = re.sub(r'[\/:*?"<>|]', "_", name)
+    name = re.sub(r'[\\/:*?"<>|]', "_", name)
     # Strip trailing .json so "foo.json" becomes "foo" and stays consistent
     if name.lower().endswith(".json"):
         name = name[:-5]
@@ -232,8 +220,7 @@ def _sanitize_session_name(name: str) -> str:
 # *two or more* such markers are found outside ``` code blocks. A single
 # marker is treated as legitimate content (definitions, examples, etc.).
 _TURN_RE = re.compile(
-    r"
-[ 	]*(?:User|Assistant|AI)[ 	]*[:ï¼]",
+    r"\n[ \t]*(?:User|Assistant|AI)[ \t]*[:：]",
     re.IGNORECASE,
 )
 _TURN_WORDS = ("user", "assistant", "ai")
@@ -243,7 +230,7 @@ def _truncate_at_turn(text: str) -> str:
     """Truncate text at the first turn-marker if turn guard is enabled.
 
     To reduce false positives (e.g. definitions like "AI: artificial
-    intelligence" or "User: å©ç¨è"), we only truncate when *two or more*
+    intelligence" or "User: 利用者"), we only truncate when *two or more*
     turn markers are found outside ``` code blocks. A single marker is
     treated as intentional content (definitions, examples, etc.).
     """
@@ -279,17 +266,15 @@ def _find_turn_markers(text: str) -> list[int]:
 
 def _held_back_len(text: str) -> int:
     """Length of the tail that may be the start of a turn marker split across
-    stream chunks (e.g. "
-Us" + "er:"). Streaming holds these back until the
+    stream chunks (e.g. "\nUs" + "er:"). Streaming holds these back until the
     next chunk shows whether they really are a marker."""
     if not _turn_guard_enabled:
         return 0
-    nl = text.rfind("
-")
+    nl = text.rfind("\n")
     if nl == -1:
         return 0
-    tail = text[nl + 1:].lstrip(" 	").lower()
-    word = tail.rstrip(" 	")
+    tail = text[nl + 1:].lstrip(" \t").lower()
+    word = tail.rstrip(" \t")
     if word == "" or any(w.startswith(word) for w in _TURN_WORDS):
         return len(text) - nl
     return 0
@@ -333,8 +318,7 @@ def _ask(prompt_text: str, multiline: bool = False) -> str:
     extra = _pending_lines()
     if extra:
         if multiline:
-            return "
-".join([first] + extra).strip()
+            return "\n".join([first] + extra).strip()
         print(
             f"{Fore.YELLOW}[~] Ignored {len(extra)} extra pasted line(s); "
             f"only the first line was used.{Style.RESET_ALL}"
@@ -342,7 +326,7 @@ def _ask(prompt_text: str, multiline: bool = False) -> str:
     return first.strip()
 
 
-def _read_input(prompt: str = "") -> tuple[str, bool]:
+def _read_input() -> tuple[str, bool]:
     """Read input, detecting multi-line paste and merging into a single message.
 
     When a user pastes multi-line text into a terminal, each line is fed to
@@ -350,15 +334,11 @@ def _read_input(prompt: str = "") -> tuple[str, bool]:
     short timeout (0.1s) after the first line. Human typing is too slow to
     trigger this; only pasted text does.
 
-    Args:
-        prompt: Prompt string passed directly to input() so readline knows
-            the display width and can redraw it correctly on line editing.
-
     Returns:
         (text, is_paste): text is the merged input, is_paste is True if
         multiple lines were detected and merged.
     """
-    lines = [input(prompt)] + _pending_lines()
+    lines = [input()] + _pending_lines()
 
     is_paste = len(lines) > 1
     if is_paste:
@@ -367,8 +347,7 @@ def _read_input(prompt: str = "") -> tuple[str, bool]:
             f"merged into one message.{Style.RESET_ALL}"
         )
 
-    return "
-".join(lines), is_paste
+    return "\n".join(lines), is_paste
 
 # ============ CONFIG ============
 def load_config() -> dict:
@@ -421,24 +400,19 @@ def render_markdown(text: str) -> str:
     in_code_block = False
 
     for raw_line in text.splitlines(keepends=True):
-        line = raw_line.rstrip("
-
-")
+        line = raw_line.rstrip("\n\r")
 
         if line.strip().startswith("```"):
             in_code_block = not in_code_block
             if in_code_block:
                 lang = line.strip()[3:].strip()
-                result.append(f"{Fore.CYAN}â¶ {lang if lang else 'code'}{Style.RESET_ALL}
-")
+                result.append(f"{Fore.CYAN}▶ {lang if lang else 'code'}{Style.RESET_ALL}\n")
             else:
-                result.append(f"{Fore.CYAN}â{Style.RESET_ALL}
-")
+                result.append(f"{Fore.CYAN}◀{Style.RESET_ALL}\n")
             continue
 
         if in_code_block:
-            result.append(f"{Fore.LIGHTBLACK_EX}{line}{Style.RESET_ALL}
-")
+            result.append(f"{Fore.LIGHTBLACK_EX}{line}{Style.RESET_ALL}\n")
             continue
 
         header_match = re.match(r"^(#{1,6})\s+(.*)$", line)
@@ -446,8 +420,7 @@ def render_markdown(text: str) -> str:
             level = len(header_match.group(1))
             colors = [Fore.RED, Fore.YELLOW, Fore.GREEN, Fore.CYAN, Fore.MAGENTA, Fore.WHITE]
             color = colors[level - 1] if level <= len(colors) else Fore.WHITE
-            result.append(f"{color}{Style.BRIGHT}{line}{Style.RESET_ALL}
-")
+            result.append(f"{color}{Style.BRIGHT}{line}{Style.RESET_ALL}\n")
             continue
 
         formatted = line
@@ -461,11 +434,9 @@ def render_markdown(text: str) -> str:
             lambda m: f"{Fore.LIGHTBLACK_EX}{m.group(1)}{Style.RESET_ALL}",
             formatted,
         )
-        result.append(f"{formatted}
-")
+        result.append(f"{formatted}\n")
 
-    return "".join(result).rstrip("
-")
+    return "".join(result).rstrip("\n")
 
 # ============ MODELS ============
 def _extract_model_name(item: str | dict) -> Optional[str]:
@@ -503,15 +474,13 @@ def fetch_models() -> None:
 
 def select_model() -> None:
     global current_model
-    print(f"
-{Fore.YELLOW}Available models:{Style.RESET_ALL}")
+    print(f"\n{Fore.YELLOW}Available models:{Style.RESET_ALL}")
     for i, m in enumerate(available_models, 1):
         marker = f"{Fore.GREEN}*{Style.RESET_ALL}" if m == current_model else " "
         print(f"  [{marker}] {i}. {m}")
 
     choice = _ask(
-        f"
-{Fore.CYAN}[+] Select model (number or name, Enter to keep {current_model}): {Style.RESET_ALL}"
+        f"\n{Fore.CYAN}[+] Select model (number or name, Enter to keep {current_model}): {Style.RESET_ALL}"
     )
     if not choice:
         return
@@ -532,10 +501,8 @@ def select_model() -> None:
 # ============ SYSTEM PROMPT ============
 def set_system_prompt() -> None:
     global _system_prompt
-    print(f"
-{Fore.YELLOW}Current system prompt:{Style.RESET_ALL}")
-    print(f"  {_system_prompt}
-")
+    print(f"\n{Fore.YELLOW}Current system prompt:{Style.RESET_ALL}")
+    print(f"  {_system_prompt}\n")
     print(
         f"{Fore.CYAN}Enter new prompt. "
         f"Type [end] to finish, [reset] for default:{Style.RESET_ALL}"
@@ -554,8 +521,7 @@ def set_system_prompt() -> None:
         if line.strip() == "[end]":
             break
         lines.append(line)
-    joined = "
-".join(lines).strip()
+    joined = "\n".join(lines).strip()
     if joined:
         _system_prompt = joined
         print(f"{Fore.GREEN}[OK] System prompt updated.{Style.RESET_ALL}")
@@ -598,12 +564,10 @@ def _prompt_optional_int(prompt_text: str) -> Optional[int]:
 
 def edit_config() -> None:
     global _temperature, _max_tokens
-    print(f"
-{Fore.YELLOW}Current configuration:{Style.RESET_ALL}")
+    print(f"\n{Fore.YELLOW}Current configuration:{Style.RESET_ALL}")
     print(f"  temperature : {_temperature}")
     mt = str(_max_tokens) if _max_tokens is not None else "(unset / server default)"
-    print(f"  max_tokens  : {mt}
-")
+    print(f"  max_tokens  : {mt}\n")
 
     new_temp = _prompt_float(
         f"{Fore.CYAN}[+] temperature (current: {_temperature}, Enter=keep, 0.0-2.0): {Style.RESET_ALL}",
@@ -720,8 +684,7 @@ def _auto_save_all_sessions() -> None:
         _save_session_atomic(name)
 
 def list_sessions() -> None:
-    print(f"
-{Fore.YELLOW}Sessions:{Style.RESET_ALL}")
+    print(f"\n{Fore.YELLOW}Sessions:{Style.RESET_ALL}")
     for i, name in enumerate(sorted(_sessions.keys()), 1):
         marker = f"{Fore.GREEN}*{Style.RESET_ALL}" if name == _current_session else " "
         count = len(_sessions[name])
@@ -801,7 +764,7 @@ def rename_session() -> None:
     new_path = os.path.join(SESSION_DIR, _safe_session_name(new))
     try:
         if os.path.exists(old_path):
-            # On case-insensitive filesystems (Windows/macOS) renaming "work" â "Work"
+            # On case-insensitive filesystems (Windows/macOS) renaming "work" → "Work"
             # resolves to the same physical file.  Skip deletion so we don't nuke the
             # newly-written session.
             try:
@@ -813,7 +776,7 @@ def rename_session() -> None:
     except OSError as e:
         print(f"{Fore.YELLOW}[!] Could not remove old file: {e}{Style.RESET_ALL}")
 
-    print(f"{Fore.GREEN}[OK] Renamed '{old}' â '{new}'{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}[OK] Renamed '{old}' → '{new}'{Style.RESET_ALL}")
 
 def delete_session() -> None:
     name = _ask(f"{Fore.CYAN}[+] Delete session (name, Enter=cancel): {Style.RESET_ALL}")
@@ -839,19 +802,6 @@ def delete_session() -> None:
         print(f"{Fore.YELLOW}[!] Could not remove file: {e}{Style.RESET_ALL}")
     print(f"{Fore.GREEN}[OK] Deleted '{name}'{Style.RESET_ALL}")
 
-def _server_error_text(resp: Optional[requests.Response]) -> str:
-    """Short reason taken from an error response body (JSON "error" field if present)."""
-    if resp is None:
-        return ""
-    try:
-        data = resp.json()
-        if isinstance(data, dict) and data.get("error"):
-            return str(data["error"])[:200]
-    except ValueError:
-        pass
-    text = (resp.text or "").strip()
-    return "" if text in ("", "{}") else text[:200]
-
 # ============ CHAT ============
 def send_chat(
     messages: list[dict[str, str]], stream: bool = True
@@ -867,7 +817,7 @@ def send_chat(
 
     headers = {
         "Content-Type": "application/json",
-        "User-Agent": "PollenChat/2.8.11",
+        "User-Agent": "PollenChat/2.8.10",
     }
 
     try:
@@ -878,27 +828,13 @@ def send_chat(
         response.raise_for_status()
         return response
     except requests.exceptions.HTTPError as e:
-        code = e.response.status_code if e.response is not None else None
-        reason = _server_error_text(e.response)
-        if code == 429:
+        if e.response is not None and e.response.status_code == 429:
             print(
                 f"{Fore.RED}[!] Rate limited (429). "
                 f"PollinationsAI free tier has limits. Wait a moment and retry.{Style.RESET_ALL}"
             )
-        elif code is not None and code >= 500:
-            print(
-                f"{Fore.RED}[!] HTTP {code} from server: "
-                f"{reason or '(no details)'}{Style.RESET_ALL}"
-            )
-            print(
-                f"{Fore.YELLOW}    Server-side problem, not a PollenChat bug. "
-                f"Retry later.{Style.RESET_ALL}"
-            )
         else:
-            detail = f" â {reason}" if reason else ""
-            print(
-                f"{Fore.RED}[!] HTTP Error: {e}{detail}{Style.RESET_ALL}"
-            )
+            print(f"{Fore.RED}[!] HTTP Error: {e}{Style.RESET_ALL}")
         return None
     except Exception as e:
         print(f"{Fore.RED}[!] Request failed: {e}{Style.RESET_ALL}")
@@ -989,11 +925,9 @@ def stream_response(response: requests.Response) -> tuple[str, bool]:
                 f"the response may be cut off.{Style.RESET_ALL}"
             )
     except KeyboardInterrupt:
-        print(f"
-{Fore.YELLOW}[!] Interrupted by user.{Style.RESET_ALL}")
+        print(f"\n{Fore.YELLOW}[!] Interrupted by user.{Style.RESET_ALL}")
     except requests.exceptions.RequestException as e:
-        print(f"
-{Fore.RED}[!] Stream error: {e}{Style.RESET_ALL}")
+        print(f"\n{Fore.RED}[!] Stream error: {e}{Style.RESET_ALL}")
     finally:
         response.close()
         # Defensive flush: on some terminal emulators (e.g. Colab xterm.js)
@@ -1013,8 +947,7 @@ def batch_response(response: requests.Response) -> tuple[str, bool]:
                     truncated = _truncate_at_turn(content)
                     if truncated != content:
                         print(
-                            f"
-{Fore.YELLOW}[~] Turn guard stopped fake turn generation.{Style.RESET_ALL}"
+                            f"\n{Fore.YELLOW}[~] Turn guard stopped fake turn generation.{Style.RESET_ALL}"
                         )
                     print(Fore.MAGENTA + truncated + Style.RESET_ALL)
                     return truncated, True
@@ -1051,8 +984,7 @@ def chat_once(user_input: str) -> bool:
 
     _sessions[_current_session].append({"role": "user", "content": user_input})
 
-    print(f"
-{Fore.YELLOW}PollenChat ({current_model}):{Style.RESET_ALL} ", end="", flush=True)
+    print(f"\n{Fore.YELLOW}PollenChat ({current_model}):{Style.RESET_ALL} ", end="", flush=True)
 
     if _stream_mode:
         assistant_text, completed = stream_response(response)
@@ -1061,7 +993,7 @@ def chat_once(user_input: str) -> bool:
 
     if not completed or not assistant_text:
         _sessions[_current_session].pop()
-        print(f"{Fore.YELLOW}[~] ãã®å¿ç­ã¯å±¥æ­´ã«è¿½å ãã¾ããã§ããã{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}[~] この応答は履歴に追加しませんでした。{Style.RESET_ALL}")
         _last_assistant_text = ""
         _session_last_text[_current_session] = ""
         return False
@@ -1077,19 +1009,13 @@ def render_last() -> None:
     if not _last_assistant_text:
         print(f"{Fore.YELLOW}[~] No assistant response to render yet.{Style.RESET_ALL}")
         return
-    print(f"
-{Fore.YELLOW}--- Rendered (Markdown) ---{Style.RESET_ALL}
-")
+    print(f"\n{Fore.YELLOW}--- Rendered (Markdown) ---{Style.RESET_ALL}\n")
     print(render_markdown(_last_assistant_text))
-    print(f"
-{Fore.YELLOW}---------------------------{Style.RESET_ALL}
-")
+    print(f"\n{Fore.YELLOW}---------------------------{Style.RESET_ALL}\n")
 
 # ============ SAVE CODE ============
 def _extract_code_blocks(text: str) -> list[tuple[str, str]]:
-    pattern = r"```([\w+\-#]*)
-(.*?)
-```"
+    pattern = r"```([\w+\-#]*)\n(.*?)\n```"
     return re.findall(pattern, text, re.DOTALL)
 
 def _guess_extension(lang: str) -> str:
@@ -1107,20 +1033,16 @@ def save_code() -> None:
         )
         return
 
-    print(f"
-{Fore.YELLOW}Code blocks found: {len(blocks)}{Style.RESET_ALL}")
+    print(f"\n{Fore.YELLOW}Code blocks found: {len(blocks)}{Style.RESET_ALL}")
     for i, (lang, code_text) in enumerate(blocks, 1):
         lang_display = lang if lang else "(no language)"
-        line_count = code_text.count("
-") + 1
-        preview = code_text[:80].replace("
-", " ")
+        line_count = code_text.count("\n") + 1
+        preview = code_text[:80].replace("\n", " ")
         suffix = "..." if len(code_text) > 80 else ""
-        print(f"  {i}. [{lang_display}] {line_count} lines â {preview}{suffix}")
+        print(f"  {i}. [{lang_display}] {line_count} lines — {preview}{suffix}")
 
     choice = _ask(
-        f"
-{Fore.CYAN}[+] Select block number (Enter = 1, [all] = save each): {Style.RESET_ALL}"
+        f"\n{Fore.CYAN}[+] Select block number (Enter = 1, [all] = save each): {Style.RESET_ALL}"
     )
 
     if choice.lower() == "all":
@@ -1187,32 +1109,18 @@ def export_session() -> None:
         include_system = sp_choice == "y"
 
     lines = []
-    lines.append("# PollenChat Session Export
-")
-    lines.append(f"- **Model:** {current_model}
-")
-    lines.append(f"- **Date:** {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}
-")
+    lines.append("# PollenChat Session Export\n")
+    lines.append(f"- **Model:** {current_model}\n")
+    lines.append(f"- **Date:** {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}\n")
     if include_system:
-        lines.append(f"- **System Prompt:** {_system_prompt}
-")
-    lines.append("
----
-")
+        lines.append(f"- **System Prompt:** {_system_prompt}\n")
+    lines.append("\n---\n")
 
     for msg in _sessions[_current_session]:
         role = "User" if msg["role"] == "user" else "Assistant"
-        lines.append(f"
-## {role}
+        lines.append(f"\n## {role}\n\n{msg['content']}\n")
 
-{msg['content']}
-")
-
-    lines.append("
----
-
-*Exported by PollenChat*
-")
+    lines.append("\n---\n\n*Exported by PollenChat*\n")
 
     path = os.path.join(EXPORT_DIR, fname)
     try:
@@ -1236,14 +1144,10 @@ _EXPORT_SLICE_RE = re.compile(r"^(-?\d*):(-?\d*)(?::(-?\d*))?$")
 _EXPORT_FLAGS = ("rev", "bare", "full")
 
 EXPORT_USAGE = (
-    "Usage: [export] | [export list] | [export <index|slice> [rev] [bare] [full]]
-"
-    "  index : 0 = oldest, -1 = latest          e.g. [export -1]
-"
-    "  slice : start:stop:step (stop excluded)  e.g. [export -3:]  [export 2:5]  [export ::-1]
-"
-    "  rev   : reverse the selected order       bare : answers only
-"
+    "Usage: [export] | [export list] | [export <index|slice> [rev] [bare] [full]]\n"
+    "  index : 0 = oldest, -1 = latest          e.g. [export -1]\n"
+    "  slice : start:stop:step (stop excluded)  e.g. [export -3:]  [export 2:5]  [export ::-1]\n"
+    "  rev   : reverse the selected order       bare : answers only\n"
     "  full  : do not shorten long questions"
 )
 
@@ -1306,11 +1210,9 @@ def _parse_export_args(raw: str, n: int) -> tuple[Optional[dict], Optional[str]]
 def _balance_fences(text: str, inside: bool = False) -> str:
     """Make sure ``` fences in a cut-out piece are paired."""
     if inside:
-        text = "```
-" + text
+        text = "```\n" + text
     if text.count("```") % 2 == 1:
-        text += "
-```"
+        text += "\n```"
     return text
 
 
@@ -1323,21 +1225,16 @@ def _shorten_question(q: str) -> str:
     tail = q[-EXPORT_Q_TAIL:]
     tail_inside = q[: len(q) - EXPORT_Q_TAIL].count("```") % 2 == 1
     note = (
-        f"â¦ï¼å¨ {len(q):,} æå­ã®ãã¡åé ­ {EXPORT_Q_HEAD} æå­ã¨"
-        f"æ«å°¾ {EXPORT_Q_TAIL} æå­ãè¡¨ç¤ºï¼â¦"
+        f"…（全 {len(q):,} 文字のうち先頭 {EXPORT_Q_HEAD} 文字と"
+        f"末尾 {EXPORT_Q_TAIL} 文字を表示）…"
     )
-    short = f"{_balance_fences(head)}
-
-{note}
-
-{_balance_fences(tail, tail_inside)}"
+    short = f"{_balance_fences(head)}\n\n{note}\n\n{_balance_fences(tail, tail_inside)}"
     return short if len(short) < len(q) else q  # never make it longer
 
 
 def _quote(text: str) -> str:
     lines = text.splitlines() or [""]
-    return "
-".join(f"> {ln}" if ln else ">" for ln in lines)
+    return "\n".join(f"> {ln}" if ln else ">" for ln in lines)
 
 
 def _build_exchange_md(
@@ -1350,18 +1247,9 @@ def _build_exchange_md(
 
     if "bare" in flags:
         if len(picked) == 1:
-            return exs[picked[0]][1].rstrip("
-") + "
-"
-        blocks = [f"{heading(i)}
-
-{exs[i][1].rstrip()}" for i in picked]
-        return "
-
----
-
-".join(blocks) + "
-"
+            return exs[picked[0]][1].rstrip("\n") + "\n"
+        blocks = [f"{heading(i)}\n\n{exs[i][1].rstrip()}" for i in picked]
+        return "\n\n---\n\n".join(blocks) + "\n"
 
     if len(picked) == 1:
         order = "1 exchange"
@@ -1375,43 +1263,22 @@ def _build_exchange_md(
         order = f"{len(picked)} exchanges, {how}"
 
     lines = [
-        "# PollenChat Export
-",
-        f"- **Session:** {_current_session}
-",
-        f"- **Selection:** {sel_text} ({order})
-",
-        f"- **Model:** {current_model} (at export)
-",
-        f"- **Date:** {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}
-",
-        "
----
-",
+        "# PollenChat Export\n",
+        f"- **Session:** {_current_session}\n",
+        f"- **Selection:** {sel_text} ({order})\n",
+        f"- **Model:** {current_model} (at export)\n",
+        f"- **Date:** {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}\n",
+        "\n---\n",
     ]
     for i in picked:
         question, answer = exs[i]
-        lines.append(f"
-{heading(i)}
-")
+        lines.append(f"\n{heading(i)}\n")
         if question:
             q = question if "full" in flags else _shorten_question(question)
-            lines.append(f"
-### User
-
-{_quote(q)}
-")
-        lines.append(f"
-### Assistant
-
-{answer.rstrip()}
-")
-        lines.append("
----
-")
-    lines.append("
-*Exported by PollenChat*
-")
+            lines.append(f"\n### User\n\n{_quote(q)}\n")
+        lines.append(f"\n### Assistant\n\n{answer.rstrip()}\n")
+        lines.append("\n---\n")
+    lines.append("\n*Exported by PollenChat*\n")
     return "".join(lines)
 
 
@@ -1433,15 +1300,14 @@ def _export_filename(picked: list[int], flags: set[str]) -> str:
 
 def _one_line(text: str, limit: int) -> str:
     flat = " ".join(text.split())
-    return flat if len(flat) <= limit else flat[:limit] + "â¦"
+    return flat if len(flat) <= limit else flat[:limit] + "…"
 
 
 def _print_exchange_list(exs: list[tuple[str, str]]) -> None:
     n = len(exs)
     w = len(str(n - 1))
     print(
-        f"
-{Fore.YELLOW}Exchanges in '{_current_session}' "
+        f"\n{Fore.YELLOW}Exchanges in '{_current_session}' "
         f"(oldest first, {n} total):{Style.RESET_ALL}"
     )
     for i, (q, a) in enumerate(exs):
@@ -1461,8 +1327,7 @@ def export_exchanges(raw: str) -> None:
 
     parsed, err = _parse_export_args(raw, len(exs))
     if err or parsed is None:
-        print(f"{Fore.RED}[!] {err}{Style.RESET_ALL}
-{EXPORT_USAGE}")
+        print(f"{Fore.RED}[!] {err}{Style.RESET_ALL}\n{EXPORT_USAGE}")
         return
     if parsed.get("list"):
         _print_exchange_list(exs)
@@ -1488,7 +1353,7 @@ def export_exchanges(raw: str) -> None:
 def import_file() -> None:
     raw_path = _ask(f"{Fore.CYAN}[+] File path: {Style.RESET_ALL}")
     # Strip surrounding quotes that shell or copy-paste may add
-    raw_path = raw_path.strip("'"")
+    raw_path = raw_path.strip("'\"")
     path = os.path.expanduser(raw_path)
     if not path or not os.path.isfile(path):
         print(f"{Fore.RED}[!] File not found.{Style.RESET_ALL}")
@@ -1515,20 +1380,16 @@ def import_file() -> None:
         return
 
     print(f"{Fore.GREEN}[OK] Loaded {len(content):,} characters.{Style.RESET_ALL}")
-    preview = content[:200].replace("
-", " ")
+    preview = content[:200].replace("\n", " ")
     suffix = "..." if len(content) > 200 else ""
-    print(f"{Fore.CYAN}[Preview]:{Style.RESET_ALL} {preview}{suffix}
-")
+    print(f"{Fore.CYAN}[Preview]:{Style.RESET_ALL} {preview}{suffix}\n")
 
     extra = _ask(
         f"{Fore.CYAN}[+] Question about this file (Enter to send file content only): {Style.RESET_ALL}",
         multiline=True,
     )
 
-    full_input = f"{content}
-
-{extra}" if extra else content
+    full_input = f"{content}\n\n{extra}" if extra else content
     chat_once(full_input)
 
 # ============ UNDO ============
@@ -1561,16 +1422,14 @@ def estimate_tokens() -> None:
     non_ascii_chars = total_chars - ascii_chars
     est = ascii_chars / 4 + non_ascii_chars / 1.5
 
-    print(f"
-{Fore.YELLOW}Token estimate ({_current_session}):{Style.RESET_ALL}")
+    print(f"\n{Fore.YELLOW}Token estimate ({_current_session}):{Style.RESET_ALL}")
     print(f"  Approximate tokens : {int(est):,}")
     print(f"  Total characters   : {total_chars:,}")
     print(f"  ASCII chars        : {ascii_chars:,}")
     print(f"  Non-ASCII chars    : {non_ascii_chars:,}")
     print(
-        f"{Fore.YELLOW}  â» Rough estimate. "
-        f"Actual API sends only last {MAX_HISTORY} messages (plus system).{Style.RESET_ALL}
-"
+        f"{Fore.YELLOW}  ※ Rough estimate. "
+        f"Actual API sends only last {MAX_HISTORY} messages (plus system).{Style.RESET_ALL}\n"
     )
 
 # ============ IMAGE GENERATION ============
@@ -1640,17 +1499,14 @@ def generate_image(
 def image_mode() -> None:
     global _img_width, _img_height, _img_seed
 
-    print(f"
-{Fore.YELLOW}Image Generation Mode{Style.RESET_ALL}")
+    print(f"\n{Fore.YELLOW}Image Generation Mode{Style.RESET_ALL}")
     print(
         f"  Current: {_img_width}x{_img_height}, "
-        f"seed={_img_seed if _img_seed is not None else 'random'}
-"
+        f"seed={_img_seed if _img_seed is not None else 'random'}\n"
     )
     print("  Type your prompt, 'exit' to leave, or:")
-    print("  [size] â change width/height")
-    print("  [seed] â set/clear a fixed seed
-")
+    print("  [size] — change width/height")
+    print("  [seed] — set/clear a fixed seed\n")
 
     while True:
         prompt = _ask(f"{Fore.CYAN}[image] {username}: {Style.RESET_ALL}")
@@ -1659,8 +1515,7 @@ def image_mode() -> None:
 
         cmd = prompt.lower()
         if cmd in ("exit", "quit", "back"):
-            print(f"{Fore.YELLOW}[~] Returning to chat mode.{Style.RESET_ALL}
-")
+            print(f"{Fore.YELLOW}[~] Returning to chat mode.{Style.RESET_ALL}\n")
             break
         elif cmd in ("[size]", "size"):
             w_input = _ask(
@@ -1717,8 +1572,7 @@ def read_multiline() -> str:
         if line.strip() == "[end]":
             break
         lines.append(line)
-    return "
-".join(lines)
+    return "\n".join(lines)
 
 # ============ SEARCH ============
 def search_history() -> None:
@@ -1739,8 +1593,7 @@ def search_history() -> None:
         print(f"{Fore.YELLOW}[~] No matches found.{Style.RESET_ALL}")
         return
 
-    print(f"
-{Fore.GREEN}{len(matches)} match(es):{Style.RESET_ALL}")
+    print(f"\n{Fore.GREEN}{len(matches)} match(es):{Style.RESET_ALL}")
     for idx, role_label, snippet in matches:
         color = Fore.GREEN if role_label == username else Fore.MAGENTA
         print(f"  {color}[{idx}]{role_label}:{Style.RESET_ALL} {snippet}")
@@ -1778,14 +1631,12 @@ def load_session() -> None:
         print(f"{Fore.YELLOW}[!] No saved sessions found.{Style.RESET_ALL}")
         return
 
-    print(f"
-{Fore.YELLOW}Saved sessions:{Style.RESET_ALL}")
+    print(f"\n{Fore.YELLOW}Saved sessions:{Style.RESET_ALL}")
     for i, f in enumerate(files, 1):
         print(f"  {i}. {f}")
 
     choice = _ask(
-        f"
-{Fore.CYAN}[+] Select session (number or name): {Style.RESET_ALL}"
+        f"\n{Fore.CYAN}[+] Select session (number or name): {Style.RESET_ALL}"
     )
     if not choice:
         return
@@ -1851,40 +1702,40 @@ def clear_history() -> None:
 HELP_TEXT = r"""
 PollenChat Commands:
 
-  [model]       â Select AI model
-  [system]      â Set or view the system prompt
-  [config]      â Set temperature / max_tokens
-  [stream]      â Toggle streaming / batch display mode (batch recommended on web terminals)
-  [guard]       â Toggle turn guard (default OFF). Stops models that spontaneously
+  [model]       — Select AI model
+  [system]      — Set or view the system prompt
+  [config]      — Set temperature / max_tokens
+  [stream]      — Toggle streaming / batch display mode (batch recommended on web terminals)
+  [guard]       — Toggle turn guard (default OFF). Stops models that spontaneously
                   generate fake User:/Assistant: turns. Requires 2+ role labels
                   outside code blocks before cutting (reduces false positives).
-  [image]       â Enter image generation mode
-  [long]        â Enter multiline input mode (type [end] to finish)
-  [import]      â Import a .md/.txt file and send as user message
-  [search]      â Search conversation history
-  [render]      â Re-display last response with Markdown formatting
-  [savecode]    â Extract and save code blocks from last response
-  [export]      â Export conversation to Markdown file
-  [export list] â List Q&A exchanges with indexes (0 = oldest, -1 = latest)
-  [export -1]   â Export exchange(s) by index or slice (stop excluded):
+  [image]       — Enter image generation mode
+  [long]        — Enter multiline input mode (type [end] to finish)
+  [import]      — Import a .md/.txt file and send as user message
+  [search]      — Search conversation history
+  [render]      — Re-display last response with Markdown formatting
+  [savecode]    — Extract and save code blocks from last response
+  [export]      — Export conversation to Markdown file
+  [export list] — List Q&A exchanges with indexes (0 = oldest, -1 = latest)
+  [export -1]   — Export exchange(s) by index or slice (stop excluded):
                   [export -3:]  [export 2:5]  [export ::-1]
                   flags: rev (reverse order) / bare (answers only) / full (keep long questions)
-  [undo]        â Remove the last user-assistant exchange
-  [token]       â Show rough token estimate for current context
+  [undo]        — Remove the last user-assistant exchange
+  [token]       — Show rough token estimate for current context
 
   --- Sessions ---
-  [sessions]    â List all sessions
-  [switch]      â Switch to another session
-  [new]         â Create a new empty session
-  [rename]      â Rename the current session
-  [delete]      â Delete a session (not current)
-  [save]        â Save current session (legacy)
-  [load]        â Load a session from file (legacy)
+  [sessions]    — List all sessions
+  [switch]      — Switch to another session
+  [new]         — Create a new empty session
+  [rename]      — Rename the current session
+  [delete]      — Delete a session (not current)
+  [save]        — Save current session (legacy)
+  [load]        — Load a session from file (legacy)
 
-  [clear]       â Clear current session history
-  [history]     â Show current session history
-  [help]        â Show this help
-  [exit]        â Quit PollenChat
+  [clear]       — Clear current session history
+  [history]     — Show current session history
+  [help]        — Show this help
+  [exit]        — Quit PollenChat
 
 Just type normally to chat with the AI!
 """
@@ -1906,8 +1757,7 @@ def main() -> None:
 
     print(f"{Fore.CYAN}[~] Fetching available models from PollinationsAI...{Style.RESET_ALL}")
     fetch_models()
-    print(f"{Fore.GREEN}[OK] {len(available_models)} models available.{Style.RESET_ALL}
-")
+    print(f"{Fore.GREEN}[OK] {len(available_models)} models available.{Style.RESET_ALL}\n")
 
     if not cfg.get("username"):
         default_name = os.environ.get("USER", os.environ.get("USERNAME", "User"))
@@ -1920,8 +1770,7 @@ def main() -> None:
     print(f"{Fore.GREEN}[OK] Welcome, {username}! Type [help] for commands.{Style.RESET_ALL}")
     print(
         f"{Fore.GREEN}[OK] Current session: '{_current_session}' "
-        f"({len(_sessions[_current_session])} messages){Style.RESET_ALL}
-"
+        f"({len(_sessions[_current_session])} messages){Style.RESET_ALL}\n"
     )
 
     try:
@@ -1934,7 +1783,8 @@ def main() -> None:
                     f"{Fore.GREEN}{username}{Style.RESET_ALL}"
                     f"{Fore.CYAN}[{_current_session}]{Style.RESET_ALL} : "
                 )
-                user_input, is_paste = _read_input(prompt_str)
+                print(prompt_str, end="", flush=True)
+                user_input, is_paste = _read_input()
                 user_input = user_input.strip()
                 if not user_input:
                     continue
@@ -1953,8 +1803,7 @@ def main() -> None:
                     export_exchanges(m_exp.group(1))
                     continue
                 if cmd.startswith("[export "):
-                    print(f"{Fore.RED}[!] Malformed export command.{Style.RESET_ALL}
-{EXPORT_USAGE}")
+                    print(f"{Fore.RED}[!] Malformed export command.{Style.RESET_ALL}\n{EXPORT_USAGE}")
                     continue
 
                 if cmd in ("[exit]", "exit"):
@@ -1979,10 +1828,8 @@ def main() -> None:
                     if long_text.strip():
                         preview = long_text[:300]
                         suffix = "..." if len(long_text) > 300 else ""
-                        print(f"
-{Fore.GREEN}[Input preview]:{Style.RESET_ALL}")
-                        print(f"{preview}{suffix}
-")
+                        print(f"\n{Fore.GREEN}[Input preview]:{Style.RESET_ALL}")
+                        print(f"{preview}{suffix}\n")
                         chat_once(long_text)
                 elif cmd in ("[import]", "import"):
                     import_file()
@@ -2016,8 +1863,7 @@ def main() -> None:
                     clear_history()
                 elif cmd in ("[history]", "history"):
                     print(
-                        f"
-{Fore.YELLOW}Conversation History [{_current_session}] "
+                        f"\n{Fore.YELLOW}Conversation History [{_current_session}] "
                         f"({len(_sessions[_current_session])} messages):{Style.RESET_ALL}"
                     )
                     for msg in _sessions[_current_session]:
@@ -2031,8 +1877,7 @@ def main() -> None:
                     chat_once(user_input)
 
             except KeyboardInterrupt:
-                print(f"
-{Fore.YELLOW}[!] Use [exit] to quit.{Style.RESET_ALL}")
+                print(f"\n{Fore.YELLOW}[!] Use [exit] to quit.{Style.RESET_ALL}")
             except EOFError:
                 break
     finally:
