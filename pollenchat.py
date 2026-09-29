@@ -1,7 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PollenChat v2.8.11 — Clean CLI chat client for PollinationsAI
+PollenChat v2.8.12 — Clean CLI chat client for PollinationsAI
+
+Fixes in v2.8.12:
+  - New [name] command to change your display name (it used to be asked only
+    once, at first start). Names are NFC-normalised, limited to 24 display
+    columns (CJK and emoji count as 2) and must not contain control,
+    zero-width or combining characters (they break readline's cursor math).
+  - Each user message now stores the name it was sent under (a "name" field
+    in the session file). Older logs are filled from the "username" saved in
+    the session file. [history], [search], [sessions] and [export] show these
+    names, so a rename does not rewrite the past. [sessions] lists the name
+    flow, e.g. "A → B". The "name" field is never sent to the API.
+  - [load] no longer overwrites the current name with the one stored in the
+    session file (the name is a user setting, not session data).
+  - The first-start name prompt uses the same validation.
 
 Fixes in v2.8.11:
   - [export] by exchange (question + answer): [export list], [export -1],
@@ -116,6 +130,7 @@ import sys
 import json
 import re
 import random
+import unicodedata
 import datetime
 import requests
 from typing import Optional
@@ -180,7 +195,7 @@ BANNER = r"""
   / /_/ / ___/ //_/ _ \   / /   / __ \/ __ `/ __/
  / ____/ /__/ ,< /  __/  / /___/ / / / /_/ / /_
 /_/    \___/_/|_|\___/   \____/_/ /_/\__,_/\__/
-                                         v2.8.11
+                                         v2.8.12
          Clean & Harmless — Powered by PollinationsAI
 """
 
@@ -642,6 +657,96 @@ def toggle_turn_guard() -> None:
             f"translation tables). Use with care.{Style.RESET_ALL}"
         )
 
+# ============ USER NAME ============
+NAME_MAX_WIDTH = 24  # display columns (CJK and emoji count as 2)
+
+
+def _display_width(text: str) -> int:
+    return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in text)
+
+
+def _validate_username(raw: str) -> tuple[Optional[str], Optional[str]]:
+    """Normalise and check a display name. Returns (name, error)."""
+    name = " ".join(unicodedata.normalize("NFC", raw).split())
+    if not name:
+        return None, "Name cannot be empty."
+    for ch in name:
+        cat = unicodedata.category(ch)
+        if cat[0] == "C" or cat in ("Mn", "Me"):
+            return None, (
+                f"Unsupported character U+{ord(ch):04X} "
+                "(control, zero-width and combining characters are not allowed)."
+            )
+    if _display_width(name) > NAME_MAX_WIDTH:
+        return None, (
+            f"Name is too long (max {NAME_MAX_WIDTH} columns; CJK and emoji count as 2)."
+        )
+    return name, None
+
+
+def _msg_name(msg: dict) -> str:
+    """Name a user message was sent under (falls back to the current name)."""
+    n = msg.get("name")
+    return n if isinstance(n, str) and n else username
+
+
+def _stamp_names(history: list[dict], fallback: object) -> None:
+    """Give user messages without a stored name the name saved in the session file."""
+    fb = fallback if isinstance(fallback, str) and fallback else ""
+    for msg in history:
+        if msg["role"] != "user":
+            continue
+        n = msg.get("name")
+        if isinstance(n, str) and n:
+            continue
+        if fb:
+            msg["name"] = fb
+        else:
+            msg.pop("name", None)
+
+
+def _name_flow(history: list[dict]) -> list[str]:
+    """Names used by user messages in order, consecutive duplicates merged."""
+    flow: list[str] = []
+    for msg in history:
+        if msg["role"] == "user":
+            n = _msg_name(msg)
+            if not flow or flow[-1] != n:
+                flow.append(n)
+    return flow
+
+
+def _past_names() -> list[str]:
+    seen: list[str] = []
+    for sname in sorted(_sessions):
+        for n in _name_flow(_sessions[sname]):
+            if n not in seen:
+                seen.append(n)
+    return seen
+
+
+def set_username() -> None:
+    global username
+    print(f"\n{Fore.YELLOW}Current name:{Style.RESET_ALL} {username}")
+    others = [n for n in _past_names() if n != username]
+    if others:
+        print(f"{Fore.YELLOW}Also found in saved logs:{Style.RESET_ALL} {', '.join(others)}")
+    print("  (Past messages keep the name they were sent with.)")
+    raw = _ask(f"{Fore.CYAN}[+] New name (Enter to keep '{username}'): {Style.RESET_ALL}")
+    if not raw:
+        print(f"{Fore.YELLOW}[~] Kept current name.{Style.RESET_ALL}")
+        return
+    name, err = _validate_username(raw)
+    if err or name is None:
+        print(f"{Fore.RED}[!] {err}{Style.RESET_ALL}")
+        return
+    if name == username:
+        print(f"{Fore.YELLOW}[~] Same name. No change.{Style.RESET_ALL}")
+        return
+    old, username = username, name
+    save_config(build_config())
+    print(f"{Fore.GREEN}[OK] Name changed: '{old}' → '{name}'{Style.RESET_ALL}")
+
 # ============ SESSION MANAGEMENT (multi-session) ============
 def _valid_history(history: object) -> bool:
     if not isinstance(history, list):
@@ -689,6 +794,7 @@ def _auto_load_all_sessions() -> None:
                 data = json.load(f)
             history = data.get("history", []) if isinstance(data, dict) else []
             if _valid_history(history):
+                _stamp_names(history, data.get("username") if isinstance(data, dict) else None)
                 name = fname[:-5]
                 _sessions[name] = history
                 loaded_any = True
@@ -720,7 +826,11 @@ def list_sessions() -> None:
     for i, name in enumerate(sorted(_sessions.keys()), 1):
         marker = f"{Fore.GREEN}*{Style.RESET_ALL}" if name == _current_session else " "
         count = len(_sessions[name])
-        print(f"  [{marker}] {i}. {name} ({count} messages)")
+        flow = _name_flow(_sessions[name])
+        if len(flow) > 4:
+            flow = ["…"] + flow[-4:]
+        who = f"  {Fore.CYAN}{' → '.join(flow)}{Style.RESET_ALL}" if flow else ""
+        print(f"  [{marker}] {i}. {name} ({count} messages){who}")
     print()
 
 def switch_session() -> None:
@@ -862,7 +972,7 @@ def send_chat(
 
     headers = {
         "Content-Type": "application/json",
-        "User-Agent": "PollenChat/2.8.11",
+        "User-Agent": "PollenChat/2.8.12",
     }
 
     try:
@@ -1021,7 +1131,10 @@ def _build_messages_for_api(user_input: str) -> list[dict[str, str]]:
     msgs: list[dict[str, str]] = []
     if _system_prompt:
         msgs.append({"role": "system", "content": _system_prompt})
-    msgs.extend(_sessions[_current_session])
+    # Only role/content go to the API; the local "name" field stays in the log
+    msgs.extend(
+        {"role": m["role"], "content": m["content"]} for m in _sessions[_current_session]
+    )
     msgs.append({"role": "user", "content": user_input})
     return _trim_history(msgs)
 
@@ -1033,7 +1146,9 @@ def chat_once(user_input: str) -> bool:
     if not response:
         return False
 
-    _sessions[_current_session].append({"role": "user", "content": user_input})
+    _sessions[_current_session].append(
+        {"role": "user", "content": user_input, "name": username}
+    )
 
     print(f"\n{Fore.YELLOW}PollenChat ({current_model}):{Style.RESET_ALL} ", end="", flush=True)
 
@@ -1168,7 +1283,7 @@ def export_session() -> None:
     lines.append("\n---\n")
 
     for msg in _sessions[_current_session]:
-        role = "User" if msg["role"] == "user" else "Assistant"
+        role = f"User ({_msg_name(msg)})" if msg["role"] == "user" else "Assistant"
         lines.append(f"\n## {role}\n\n{msg['content']}\n")
 
     lines.append("\n---\n\n*Exported by PollenChat*\n")
@@ -1203,17 +1318,19 @@ EXPORT_USAGE = (
 )
 
 
-def _exchanges() -> list[tuple[str, str]]:
-    """(question, answer) pairs of the current session, oldest first."""
+def _exchanges() -> list[tuple[str, str, str]]:
+    """(question, answer, asker name) of the current session, oldest first."""
     history = _sessions[_current_session]
-    result: list[tuple[str, str]] = []
+    result: list[tuple[str, str, str]] = []
     for i, msg in enumerate(history):
         if msg["role"] != "assistant":
             continue
         question = ""
+        asker = ""
         if i > 0 and history[i - 1]["role"] == "user":
             question = history[i - 1]["content"]
-        result.append((question, msg["content"]))
+            asker = _msg_name(history[i - 1])
+        result.append((question, msg["content"], asker))
     return result
 
 
@@ -1289,7 +1406,7 @@ def _quote(text: str) -> str:
 
 
 def _build_exchange_md(
-    exs: list[tuple[str, str]], picked: list[int], flags: set[str], sel_text: str
+    exs: list[tuple[str, str, str]], picked: list[int], flags: set[str], sel_text: str
 ) -> str:
     n = len(exs)
 
@@ -1322,11 +1439,12 @@ def _build_exchange_md(
         "\n---\n",
     ]
     for i in picked:
-        question, answer = exs[i]
+        question, answer, asker = exs[i]
         lines.append(f"\n{heading(i)}\n")
         if question:
             q = question if "full" in flags else _shorten_question(question)
-            lines.append(f"\n### User\n\n{_quote(q)}\n")
+            label = f"User ({asker})" if asker else "User"
+            lines.append(f"\n### {label}\n\n{_quote(q)}\n")
         lines.append(f"\n### Assistant\n\n{answer.rstrip()}\n")
         lines.append("\n---\n")
     lines.append("\n*Exported by PollenChat*\n")
@@ -1354,17 +1472,17 @@ def _one_line(text: str, limit: int) -> str:
     return flat if len(flat) <= limit else flat[:limit] + "…"
 
 
-def _print_exchange_list(exs: list[tuple[str, str]]) -> None:
+def _print_exchange_list(exs: list[tuple[str, str, str]]) -> None:
     n = len(exs)
     w = len(str(n - 1))
     print(
         f"\n{Fore.YELLOW}Exchanges in '{_current_session}' "
         f"(oldest first, {n} total):{Style.RESET_ALL}"
     )
-    for i, (q, a) in enumerate(exs):
+    for i, (q, a, who) in enumerate(exs):
         print(
             f"  [{i:>{w}}] ({i - n:>{w + 1}}) "
-            f"Q: {_one_line(q, 40) or '-'} | A: {_one_line(a, 40)}"
+            f"{who or 'Q'}: {_one_line(q, 40) or '-'} | A: {_one_line(a, 40)}"
         )
     print()
 
@@ -1635,18 +1753,18 @@ def search_history() -> None:
     matches = []
     for i, msg in enumerate(_sessions[_current_session]):
         if query in msg["content"].lower():
-            role_label = username if msg["role"] == "user" else "AI"
+            role_label = _msg_name(msg) if msg["role"] == "user" else "AI"
             snippet = msg["content"][:120]
             suffix = "..." if len(msg["content"]) > 120 else ""
-            matches.append((i, role_label, snippet + suffix))
+            matches.append((i, msg["role"], role_label, snippet + suffix))
 
     if not matches:
         print(f"{Fore.YELLOW}[~] No matches found.{Style.RESET_ALL}")
         return
 
     print(f"\n{Fore.GREEN}{len(matches)} match(es):{Style.RESET_ALL}")
-    for idx, role_label, snippet in matches:
-        color = Fore.GREEN if role_label == username else Fore.MAGENTA
+    for idx, role, role_label, snippet in matches:
+        color = Fore.GREEN if role == "user" else Fore.MAGENTA
         print(f"  {color}[{idx}]{role_label}:{Style.RESET_ALL} {snippet}")
     print()
 
@@ -1675,7 +1793,7 @@ def save_session() -> None:
 
 def load_session() -> None:
     global _last_assistant_text, _current_session
-    global current_model, username, _system_prompt, _temperature, _max_tokens
+    global current_model, _system_prompt, _temperature, _max_tokens
 
     files = sorted(f for f in os.listdir(SESSION_DIR) if f.endswith(".json"))
     if not files:
@@ -1713,6 +1831,7 @@ def load_session() -> None:
         print(f"{Fore.RED}[!] Load failed: invalid session format.{Style.RESET_ALL}")
         return
 
+    _stamp_names(history, data.get("username"))
     name = fname[:-5]
     _sessions[name] = history
     _current_session = name
@@ -1721,9 +1840,6 @@ def load_session() -> None:
     model = data.get("model")
     if isinstance(model, str) and model:
         current_model = model
-    name_field = data.get("username")
-    if isinstance(name_field, str) and name_field:
-        username = name_field
     sp = data.get("system_prompt")
     if isinstance(sp, str):
         _system_prompt = sp
@@ -1755,6 +1871,7 @@ PollenChat Commands:
 
   [model]       — Select AI model
   [system]      — Set or view the system prompt
+  [name]        — Change your display name (past messages keep the name they were sent with)
   [config]      — Set temperature / max_tokens
   [stream]      — Toggle streaming / batch display mode (batch recommended on web terminals)
   [guard]       — Toggle turn guard (default OFF). Stops models that spontaneously
@@ -1812,10 +1929,20 @@ def main() -> None:
 
     if not cfg.get("username"):
         default_name = os.environ.get("USER", os.environ.get("USERNAME", "User"))
-        name_input = _ask(
-            f"{Fore.CYAN}[+] Your name (Enter for '{default_name}'): {Style.RESET_ALL}"
-        )
-        username = name_input if name_input else default_name
+        default_name = _validate_username(default_name)[0] or "User"
+        while True:
+            name_input = _ask(
+                f"{Fore.CYAN}[+] Your name (Enter for '{default_name}'): {Style.RESET_ALL}"
+            )
+            if not name_input:
+                username = default_name
+                break
+            name, err = _validate_username(name_input)
+            if err or name is None:
+                print(f"{Fore.RED}[!] {err}{Style.RESET_ALL}")
+                continue
+            username = name
+            break
         save_config(build_config())
 
     print(f"{Fore.GREEN}[OK] Welcome, {username}! Type [help] for commands.{Style.RESET_ALL}")
@@ -1852,6 +1979,9 @@ def main() -> None:
                 if m_exp:
                     export_exchanges(m_exp.group(1))
                     continue
+                if cmd.startswith("[name "):
+                    print(f"{Fore.YELLOW}[~] [name] takes no arguments; just type [name].{Style.RESET_ALL}")
+                    continue
                 if cmd.startswith("[export "):
                     print(f"{Fore.RED}[!] Malformed export command.{Style.RESET_ALL}\n{EXPORT_USAGE}")
                     continue
@@ -1865,6 +1995,8 @@ def main() -> None:
                     select_model()
                 elif cmd in ("[system]", "system"):
                     set_system_prompt()
+                elif cmd == "[name]":
+                    set_username()
                 elif cmd in ("[config]", "config"):
                     edit_config()
                 elif cmd in ("[stream]", "stream"):
@@ -1918,7 +2050,7 @@ def main() -> None:
                     )
                     for msg in _sessions[_current_session]:
                         role_color = Fore.GREEN if msg["role"] == "user" else Fore.MAGENTA
-                        role_label = username if msg["role"] == "user" else "AI"
+                        role_label = _msg_name(msg) if msg["role"] == "user" else "AI"
                         truncated = msg["content"][:100]
                         suffix = "..." if len(msg["content"]) > 100 else ""
                         print(f"  {role_color}{role_label}:{Style.RESET_ALL} {truncated}{suffix}")
